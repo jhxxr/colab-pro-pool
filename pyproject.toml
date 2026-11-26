@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=77.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "colab-pro-pool"
+version = "0.1.0"
+description = "Multi-account Google Colab Pro GPU/TPU orchestrator & MCP server for AI agents"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = [
+    "fastapi>=0.92.0",
+    "uvicorn>=0.20.0",
+    "pydantic>=1.10.0",
+    "python-multipart>=0.0.5",
+    "httpx>=0.23.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+]
+
+[project.scripts]
+cpool = "colab_pool.cli:main"
+colab-pool = "colab_pool.cli:main"
+colab-pool-server = "colab_pool.api:main"
+colab-pool-mcp = "colab_pool.mcp_server:main"
+colab-pool-client = "colab_pool.client_cli:main"
+
+[tool.setuptools.packages.find]
+include = ["colab_pool*"]
+
+[tool.setuptools.package-data]
+colab_pool = ["static/*", "static/**/*"]

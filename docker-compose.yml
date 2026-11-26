@@ -1,0 +1,16 @@
+services:
+  colab-pool:
+    image: ${COLAB_POOL_IMAGE:-ghcr.io/jhxxr/colab-pro-pool:latest}
+    build: .
+    container_name: colab-pro-pool
+    restart: unless-stopped
+    ports:
+      - "${COLAB_POOL_BIND_ADDR:-127.0.0.1}:8080:8080"
+    environment:
+      - COLAB_POOL_DATA_DIR=/var/lib/colab-pool
+      - COLAB_POOL_API_KEY=${COLAB_POOL_API_KEY:?Set COLAB_POOL_API_KEY in .env or the environment}
+      - COLAB_POOL_COOLDOWN_SECONDS=1800
+      - COLAB_POOL_CLEANUP_ORPHANS=1
+      - COLAB_POOL_CORS_ORIGINS=${COLAB_POOL_CORS_ORIGINS:-*}
+    volumes:
+      - ./data:/var/lib/colab-pool
