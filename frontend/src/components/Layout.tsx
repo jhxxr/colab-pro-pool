@@ -114,7 +114,7 @@ export function Layout({ activeTab, onNavigate, health, healthError, children }:
               <div><span className="block">运行 / 等待</span><span className="mt-1 block text-sm font-medium text-ink tabular-nums">{health.jobs_running + health.jobs_provisioning} <span className="font-normal text-muted">/ {health.jobs_queued}</span></span></div>
             </div>
           )}
-          <div className="mt-5 text-[11px] text-muted">Colab Pro Pool <span className="ml-1">{health?.version ?? '0.2.0'}</span></div>
+          <div className="mt-5 text-[11px] text-muted">Colab Pro Pool <span className="ml-1">{health?.version ?? '0.2.1'}</span></div>
         </div>
       </div>
     </div>

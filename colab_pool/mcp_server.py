@@ -302,7 +302,7 @@ def handle_jsonrpc_message(msg: dict[str, Any]) -> dict[str, Any] | None:
                 "result": {
                     "protocolVersion": MCP_PROTOCOL_VERSION,
                     "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "colab-pro-pool", "version": "0.2.0"},
+                    "serverInfo": {"name": "colab-pro-pool", "version": "0.2.1"},
                 },
             }
         if method == "ping":

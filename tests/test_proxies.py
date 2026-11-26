@@ -41,6 +41,7 @@ class ProxyManagementTests(unittest.IsolatedAsyncioTestCase):
         script = self.root / "mock_auth_cli.py"
         capture = json.dumps(str(self.root / "captured-proxy.json"))
         script.write_text(
+            "#!/usr/bin/env python3\n"
             "import json, os, sys\n"
             "from urllib.parse import urlencode\n"
             f"open({capture}, 'w', encoding='utf-8').write(json.dumps({{k: os.environ.get(k, '') for k in ('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY')}}))\n"

@@ -31,7 +31,7 @@ docker compose pull
 docker compose up -d --no-build
 ```
 
-镜像为 `ghcr.io/jhxxr/colab-pro-pool:latest`，同时提供 `linux/amd64` 与 `linux/arm64`。生产环境可在 `.env` 中通过 `COLAB_POOL_IMAGE=ghcr.io/jhxxr/colab-pro-pool:v0.2.0` 固定版本。更新时重新执行上面的 `pull` 和 `up` 命令。
+镜像为 `ghcr.io/jhxxr/colab-pro-pool:latest`，同时提供 `linux/amd64` 与 `linux/arm64`。生产环境可在 `.env` 中通过 `COLAB_POOL_IMAGE=ghcr.io/jhxxr/colab-pro-pool:v0.2.1` 固定版本。更新时重新执行上面的 `pull` 和 `up` 命令。
 
 需要自行构建时执行 `docker compose up -d --build`。`Dockerfile` 采用多阶段构建，自动编译 `frontend/` 并打入 FastAPI 静态目录，内置健康检查与固定版本的官方 `google-colab-cli`。
 
@@ -181,19 +181,19 @@ python -m pytest -v
 
 - `pyproject.toml` 的 `project.version`
 - `colab_pool/__init__.py` 的 `__version__`
-- `frontend/package.json` 的 `version`（在 `frontend/` 执行 `npm version 0.2.0 --no-git-tag-version` 会同时更新 `package-lock.json`）
+- `frontend/package.json` 的 `version`（在 `frontend/` 执行 `npm version 0.2.1 --no-git-tag-version` 会同时更新 `package-lock.json`）
 
 随后推送对应的稳定版本标签：
 
 ```bash
-git tag -a v0.2.0 -m "Release v0.2.0"
+git tag -a v0.2.1 -m "Release v0.2.1"
 git push origin main
-git push origin v0.2.0
+git push origin v0.2.1
 ```
 
 也可在 GitHub Actions 的 **Release → Run workflow** 中从 `main` 手动发布当前项目版本，成功后会自动创建对应标签。版本格式为 `MAJOR.MINOR.PATCH`，标签必须为 `vMAJOR.MINOR.PATCH`；版本不一致或标签已指向其他提交时会拒绝发布。
 
-发布流程重新运行全部 CI，在原生 amd64 / arm64 runner 上构建并启动容器，检查 MCP Server、官方 Colab CLI、Web 页面、健康端点和 API 鉴权，再推送 GHCR 镜像并合并双架构清单。镜像提供 `v0.2.0`、`0.2.0` 等版本标签；不低于现有 Latest 的版本还会更新 `latest`，补发旧版本不会覆盖最新版本。
+发布流程重新运行全部 CI，在原生 amd64 / arm64 runner 上构建并启动容器，检查 MCP Server、官方 Colab CLI、Web 页面、健康端点和 API 鉴权，再推送 GHCR 镜像并合并双架构清单。镜像提供 `v0.2.1`、`0.2.1` 等版本标签；不低于现有 Latest 的版本还会更新 `latest`，补发旧版本不会覆盖最新版本。
 
 镜像发布成功后自动创建正式 GitHub Release，上传包含生产前端与 MCP Server 的 `.whl` / `.tar.gz`、镜像清单、拉取说明及 `SHA256SUMS`。流程使用仓库自带的 `GITHUB_TOKEN`，无需额外配置 Docker Hub 密码或 PAT；工作流已声明所需的 `contents: write` 和 `packages: write` 权限。第三方 Actions 固定到提交 SHA，由 Dependabot 每周检查更新。
 
