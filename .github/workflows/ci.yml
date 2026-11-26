@@ -13,6 +13,7 @@ permissions:
 jobs:
   tests:
     name: Python ${{ matrix.python }} tests
+    needs: package
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
@@ -28,6 +29,11 @@ jobs:
           python-version: ${{ matrix.python }}
           cache: pip
           cache-dependency-path: pyproject.toml
+      - name: Download production frontend for API integration tests
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: frontend-static
+          path: colab_pool/static
       - name: Install dependencies
         run: python -m pip install '.[dev]'
       - name: Run backend and API tests
@@ -78,5 +84,12 @@ jobs:
         with:
           name: python-distributions
           path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+      - name: Share production frontend with API integration tests
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: frontend-static
+          path: colab_pool/static/
           if-no-files-found: error
           retention-days: 7
