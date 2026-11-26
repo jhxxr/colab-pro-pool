@@ -14,9 +14,11 @@ from typing import Any
 from .config import PoolSettings
 from .db import PoolDatabase
 from .remote_bootstrap import parse_first_rclone_remote
+from .proxy_config import redact_proxy_credentials
 from .utils import SAFE_NAME_RE
 
 logger = logging.getLogger("colab_pool.pool")
+_AUTO_PROXY = object()
 
 SESSION_ID_RE = re.compile(r"\b([a-z][a-z0-9\-]{1,62})\b")
 VALID_TIERS = {"free", "pro", "pro+"}
@@ -69,6 +71,9 @@ class AccountPoolManager:
             or ts - usage["updated_at"] >= max(5.0, self.settings.usage_cache_seconds)
         )
         enriched["auth_configured"] = self.detect_auth_configured(acct["home_dir"])
+        proxy_id = acct.get("proxy_id")
+        proxy = self.db.get_proxy(proxy_id) if proxy_id else None
+        enriched["proxy_name"] = proxy["name"] if proxy else None
         if acct.get("status") == "cooldown":
             remaining = int(max(0.0, float(acct.get("cooldown_until", 0.0)) - ts))
         else:
@@ -159,6 +164,8 @@ class AccountPoolManager:
         tier: str | None = None,
         enabled: bool | None = None,
         clear_cooldown: bool = False,
+        proxy_id: str | None = None,
+        set_proxy: bool = False,
     ) -> dict[str, Any] | None:
         """Update account tier, enabled state, or cooldown both in DB and on disk."""
         existing = self.db.get_account(name)
@@ -177,8 +184,12 @@ class AccountPoolManager:
         if enabled is not None:
             self.set_account_enabled_marker(existing["home_dir"], enabled)
 
+        if set_proxy and proxy_id is not None and self.db.get_proxy(proxy_id) is None:
+            raise ValueError("所选代理不存在，请刷新列表后重试。")
+
         updated = self.db.update_account(
-            name, tier=tier_norm, enabled=enabled, clear_cooldown=clear_cooldown
+            name, tier=tier_norm, enabled=enabled, clear_cooldown=clear_cooldown,
+            proxy_id=proxy_id, set_proxy=set_proxy,
         )
         return self.enrich_account(updated) if updated else None
 
@@ -229,7 +240,9 @@ class AccountPoolManager:
             )
         return profiles
 
-    def build_cli_env(self, home_dir: str) -> dict[str, str]:
+    def build_cli_env(
+        self, home_dir: str, *, proxy_id: str | None | object = _AUTO_PROXY
+    ) -> dict[str, str]:
         env = os.environ.copy()
         env["HOME"] = home_dir
         # Python's expanduser() uses USERPROFILE on Windows, ignoring HOME.
@@ -244,6 +257,20 @@ class AccountPoolManager:
             part for part in (package_root, env.get("PYTHONPATH", "")) if part
         )
         env["PYTHONUNBUFFERED"] = "1"
+        selected_proxy = (
+            self.db.get_proxy_url_for_home(home_dir)
+            if proxy_id is _AUTO_PROXY
+            else self.db.get_proxy_url(proxy_id) if isinstance(proxy_id, str) else None
+        )
+        if selected_proxy:
+            for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
+                env[key] = selected_proxy
+            for key in ("http_proxy", "https_proxy", "all_proxy"):
+                env[key] = selected_proxy
+            # Do not inherit server-level bypass rules that could send Google
+            # traffic directly instead of through this account's selected proxy.
+            env["NO_PROXY"] = ""
+            env["no_proxy"] = ""
         return env
 
     async def cleanup_orphan_runtimes(self, skip_busy: bool = True) -> dict[str, str]:
@@ -277,7 +304,9 @@ class AccountPoolManager:
                     stderr=asyncio.subprocess.STDOUT,
                 )
                 out_bytes, _ = await asyncio.wait_for(proc.communicate(), timeout=25.0)
-                output = out_bytes.decode("utf-8", errors="replace").strip()
+                output = redact_proxy_credentials(
+                    out_bytes.decode("utf-8", errors="replace")
+                ).strip()
                 results[name] = output or f"exit={proc.returncode}"
             except FileNotFoundError:
                 results[name] = f"CLI binary '{self.settings.colab_bin}' not installed yet"

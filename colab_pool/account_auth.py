@@ -46,6 +46,7 @@ class AuthSession:
     created_at: float
     expires_at: float
     reserved: bool
+    proxy_id: str | None = None
     status: str = "starting"
     authorization_url: str | None = None
     error: str = ""
@@ -60,6 +61,7 @@ class AuthSession:
             "session_id": self.session_id,
             "name": self.name,
             "tier": self.tier,
+            "proxy_id": self.proxy_id,
             "status": self.status,
             "authorization_url": self.authorization_url,
             "created_at": self.created_at,
@@ -85,7 +87,16 @@ class AccountAuthManager:
     def is_authorizing(self, name: str) -> bool:
         return name in self._by_name
 
-    def start(self, name: str, tier: str) -> dict[str, Any]:
+    def is_proxy_in_use(self, proxy_id: str) -> bool:
+        return any(
+            session.proxy_id == proxy_id and session.status in ACTIVE_STATUSES
+            for session in self._sessions.values()
+        )
+
+    def start(
+        self, name: str, tier: str, *, proxy_id: str | None = None,
+        reuse_existing_proxy: bool = True,
+    ) -> dict[str, Any]:
         if not SAFE_NAME_RE.fullmatch(name) or len(name) > 64:
             raise AuthSessionError(400, "账号名称限 1–64 位字母、数字、下划线或连字符。")
         tier = tier.strip().lower()
@@ -107,6 +118,10 @@ class AccountAuthManager:
 
         self.pool.sync_accounts_from_disk()
         existing = self.pool.db.get_account(name)
+        if reuse_existing_proxy and existing is not None and proxy_id is None:
+            proxy_id = existing.get("proxy_id")
+        if proxy_id is not None and self.pool.db.get_proxy(proxy_id) is None:
+            raise AuthSessionError(400, "所选代理不存在，请刷新列表后重试。")
         reserved = existing is not None
         if reserved and not self.pool.db.acquire_account_for_auth(name):
             raise AuthSessionError(409, "该账号正在运行任务或维护，请稍后再授权。")
@@ -115,7 +130,7 @@ class AccountAuthManager:
         session = AuthSession(
             session_id=secrets.token_urlsafe(24), name=name, tier=tier,
             created_at=now, expires_at=now + self.settings.auth_timeout_seconds,
-            reserved=reserved,
+            reserved=reserved, proxy_id=proxy_id,
         )
         self._sessions[session.session_id] = session
         self._by_name[name] = session.session_id
@@ -232,7 +247,7 @@ class AccountAuthManager:
     async def _authenticate(self, session: AuthSession, home: Path) -> None:
         proc = await asyncio.create_subprocess_exec(
             self.settings.colab_bin, "--auth", "oauth2", "sessions",
-            env=self.pool.build_cli_env(str(home)),
+            env=self.pool.build_cli_env(str(home), proxy_id=session.proxy_id),
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             start_new_session=os.name != "nt",
@@ -278,9 +293,16 @@ class AccountAuthManager:
                 raise AuthSessionError(400, "账号目录不能指向账号池目录之外。")
             write_oauth_token(target, raw)
             if session.reserved:
-                self.pool.update_account(session.name, tier=session.tier, clear_cooldown=True)
+                self.pool.update_account(
+                    session.name, tier=session.tier, clear_cooldown=True,
+                    proxy_id=session.proxy_id, set_proxy=True,
+                )
             else:
                 self.pool.register_account_dir(session.name, session.tier)
+                if session.proxy_id is not None:
+                    self.pool.update_account(
+                        session.name, proxy_id=session.proxy_id, set_proxy=True,
+                    )
             self.pool.db.invalidate_account_usage(session.name)
             # Release before enriching so the returned account is already idle.
             if session.reserved:

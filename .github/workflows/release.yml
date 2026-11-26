@@ -85,7 +85,7 @@ jobs:
           labels: ${{ steps.labels.outputs.labels }}
           provenance: false
           cache-from: type=gha,scope=release-${{ matrix.arch }}
-      - name: Verify CLI, frontend, health and API authentication
+      - name: Verify MCP, frontend, health and API authentication
         run: bash scripts/smoke_container.sh colab-pro-pool:smoke
       - name: Push verified image by digest
         id: build

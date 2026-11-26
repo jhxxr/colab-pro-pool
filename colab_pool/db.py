@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 import time
@@ -24,7 +25,16 @@ CREATE TABLE IF NOT EXISTS accounts (
     total_runs INTEGER NOT NULL DEFAULT 0,
     total_failures INTEGER NOT NULL DEFAULT 0,
     last_error TEXT NOT NULL DEFAULT '',
-    enabled INTEGER NOT NULL DEFAULT 1
+    enabled INTEGER NOT NULL DEFAULT 1,
+    proxy_id TEXT
+);
+
+CREATE TABLE IF NOT EXISTS proxies (
+    proxy_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    proxy_url TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS jobs (
@@ -74,6 +84,10 @@ ON resource_observations(observed_at DESC);
 """
 
 
+class AccountBusyError(ValueError):
+    """Raised when an account proxy assignment changes during a lease/maintenance."""
+
+
 class PoolDatabase:
     """Thread-safe SQLite state store using WAL mode and immediate write transactions."""
 
@@ -103,6 +117,23 @@ class PoolDatabase:
                     yield conn
             finally:
                 conn.close()
+
+    def _secure_db_files(self) -> None:
+        """Keep the SQLite database and WAL sidecars private on POSIX hosts."""
+        if os.name == "nt":
+            return
+        for path in (
+            self.db_path,
+            Path(f"{self.db_path}-wal"),
+            Path(f"{self.db_path}-shm"),
+        ):
+            try:
+                if path.exists():
+                    path.chmod(0o600)
+            except OSError:
+                # Database availability takes priority; deployments should also
+                # restrict the data directory at the OS/container level.
+                pass
 
     def _init_db(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -139,6 +170,7 @@ class PoolDatabase:
                     "cu_checked_at": "REAL",
                     "cu_error": "TEXT NOT NULL DEFAULT ''",
                     "cu_generation": "TEXT NOT NULL DEFAULT ''",
+                    "proxy_id": "TEXT",
                 }
                 for column, definition in usage_columns.items():
                     if column not in account_cols:
@@ -150,6 +182,7 @@ class PoolDatabase:
                 conn.commit()
             finally:
                 conn.close()
+                self._secure_db_files()
 
     # -------------------- Account Management --------------------
 
@@ -392,6 +425,8 @@ class PoolDatabase:
         tier: str | None = None,
         enabled: bool | None = None,
         clear_cooldown: bool = False,
+        proxy_id: str | None = None,
+        set_proxy: bool = False,
     ) -> dict[str, Any] | None:
         with self._conn(immediate=True) as conn:
             row = conn.execute(
@@ -399,6 +434,14 @@ class PoolDatabase:
             ).fetchone()
             if row is None:
                 return None
+
+            if set_proxy and proxy_id != row["proxy_id"]:
+                if row["status"] in {"busy", "maintenance"}:
+                    raise AccountBusyError("账号正在运行或维护，暂不能更改代理。")
+                if proxy_id is not None and conn.execute(
+                    "SELECT 1 FROM proxies WHERE proxy_id = ?", (proxy_id,)
+                ).fetchone() is None:
+                    raise ValueError("所选代理不存在，请刷新列表后重试。")
 
             clauses: list[str] = []
             params: list[Any] = []
@@ -408,6 +451,9 @@ class PoolDatabase:
             if enabled is not None:
                 clauses.append("enabled = ?")
                 params.append(1 if enabled else 0)
+            if set_proxy:
+                clauses.append("proxy_id = ?")
+                params.append(proxy_id)
             if clear_cooldown:
                 clauses.append(
                     "status = CASE WHEN status = 'maintenance' THEN 'maintenance' "
@@ -427,6 +473,103 @@ class PoolDatabase:
                 "SELECT * FROM accounts WHERE name = ?", (name,)
             ).fetchone()
             return dict(updated)
+
+    # -------------------- Proxy Management --------------------
+
+    def create_proxy(self, proxy_id: str, name: str, proxy_url: str) -> dict[str, Any]:
+        now = time.time()
+        with self._conn(immediate=True) as conn:
+            if conn.execute("SELECT 1 FROM proxies WHERE name = ?", (name,)).fetchone():
+                raise ValueError("代理名称已存在。")
+            conn.execute(
+                "INSERT INTO proxies (proxy_id, name, proxy_url, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (proxy_id, name, proxy_url, now, now),
+            )
+            row = conn.execute("SELECT * FROM proxies WHERE proxy_id = ?", (proxy_id,)).fetchone()
+            return dict(row)
+
+    def get_proxy(self, proxy_id: str) -> dict[str, Any] | None:
+        with self._conn() as conn:
+            row = conn.execute("SELECT * FROM proxies WHERE proxy_id = ?", (proxy_id,)).fetchone()
+            return dict(row) if row else None
+
+    def list_proxies(self) -> list[dict[str, Any]]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT p.*, COUNT(a.name) AS assigned_accounts "
+                "FROM proxies p LEFT JOIN accounts a ON a.proxy_id = p.proxy_id "
+                "GROUP BY p.proxy_id ORDER BY p.name COLLATE NOCASE, p.proxy_id"
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def update_proxy(
+        self, proxy_id: str, *, name: str | None = None, proxy_url: str | None = None
+    ) -> dict[str, Any] | None:
+        with self._conn(immediate=True) as conn:
+            row = conn.execute("SELECT * FROM proxies WHERE proxy_id = ?", (proxy_id,)).fetchone()
+            if row is None:
+                return None
+            next_name = name if name is not None else row["name"]
+            next_url = proxy_url if proxy_url is not None else row["proxy_url"]
+            if next_url != row["proxy_url"] and conn.execute(
+                "SELECT 1 FROM accounts WHERE proxy_id = ? "
+                "AND status IN ('busy', 'maintenance') LIMIT 1",
+                (proxy_id,),
+            ).fetchone():
+                raise ValueError("该代理正被运行中或维护中的账号使用，暂不能修改地址。")
+            duplicate = conn.execute(
+                "SELECT 1 FROM proxies WHERE name = ? AND proxy_id != ?",
+                (next_name, proxy_id),
+            ).fetchone()
+            if duplicate:
+                raise ValueError("代理名称已存在。")
+            conn.execute(
+                "UPDATE proxies SET name = ?, proxy_url = ?, updated_at = ? WHERE proxy_id = ?",
+                (next_name, next_url, time.time(), proxy_id),
+            )
+            updated = conn.execute(
+                "SELECT * FROM proxies WHERE proxy_id = ?", (proxy_id,)
+            ).fetchone()
+            return dict(updated)
+
+    def delete_proxy(self, proxy_id: str) -> bool:
+        with self._conn(immediate=True) as conn:
+            row = conn.execute("SELECT 1 FROM proxies WHERE proxy_id = ?", (proxy_id,)).fetchone()
+            if row is None:
+                return False
+            assigned = conn.execute(
+                "SELECT COUNT(*) FROM accounts WHERE proxy_id = ?", (proxy_id,)
+            ).fetchone()[0]
+            if assigned:
+                raise ValueError("该代理仍分配给账号，请先解除分配。")
+            conn.execute("DELETE FROM proxies WHERE proxy_id = ?", (proxy_id,))
+            return True
+
+    def get_proxy_url_for_account(self, name: str) -> str | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT p.proxy_url FROM accounts a JOIN proxies p ON p.proxy_id = a.proxy_id "
+                "WHERE a.name = ?",
+                (name,),
+            ).fetchone()
+            return str(row["proxy_url"]) if row else None
+
+    def get_proxy_url(self, proxy_id: str) -> str | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT proxy_url FROM proxies WHERE proxy_id = ?", (proxy_id,)
+            ).fetchone()
+            return str(row["proxy_url"]) if row else None
+
+    def get_proxy_url_for_home(self, home_dir: str) -> str | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT p.proxy_url FROM accounts a JOIN proxies p ON p.proxy_id = a.proxy_id "
+                "WHERE a.home_dir = ?",
+                (home_dir,),
+            ).fetchone()
+            return str(row["proxy_url"]) if row else None
 
     def delete_account(self, name: str) -> bool:
         with self._conn(immediate=True) as conn:

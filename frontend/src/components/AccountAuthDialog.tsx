@@ -4,12 +4,13 @@ import {
   ApiError,
   cancelAccountAuth,
   fetchAccountAuth,
+  fetchProxies,
   getPendingAccountAuthId,
   setPendingAccountAuthId,
   startAccountAuth,
   submitAccountAuthCode,
 } from '../api/client'
-import type { Account, AccountAuthSession } from '../types'
+import type { Account, AccountAuthSession, ProxyConfig } from '../types'
 
 const activeStatuses = new Set(['starting', 'awaiting_code', 'verifying'])
 const inputClass = 'w-full rounded-xl border border-control bg-inset px-3 py-2.5 text-sm text-ink focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent-ring disabled:opacity-60'
@@ -28,10 +29,12 @@ export function AccountAuthDialog({
   const completedRef = useRef(false)
   const [name, setName] = useState(account?.name ?? '')
   const [tier, setTier] = useState(account?.tier ?? 'pro')
+  const [proxyId, setProxyId] = useState(account?.proxy_id ?? '')
+  const [proxies, setProxies] = useState<ProxyConfig[]>([])
   const [session, setSession] = useState<AccountAuthSession | null>(() => {
     const sessionId = getPendingAccountAuthId()
     return sessionId ? {
-      session_id: sessionId, name: '', tier: 'pro', status: 'starting',
+      session_id: sessionId, name: '', tier: 'pro', proxy_id: null, status: 'starting',
       authorization_url: null, created_at: 0, expires_at: 0, error: '', account: null,
     } : null
   })
@@ -53,6 +56,7 @@ export function AccountAuthDialog({
     setSession(next)
     setName(next.name)
     setTier(next.tier)
+    setProxyId(next.proxy_id ?? '')
     setPendingAccountAuthId(activeStatuses.has(next.status) ? next.session_id : null)
   }
 
@@ -63,6 +67,16 @@ export function AccountAuthDialog({
     return () => {
       dialog?.close()
     }
+  }, [])
+
+  useEffect(() => {
+    let disposed = false
+    void fetchProxies().then((data) => {
+      if (!disposed) setProxies(data.proxies)
+    }).catch(() => {
+      if (!disposed) setError('无法加载代理列表；请先在「代理管理」页面检查配置。')
+    })
+    return () => { disposed = true }
   }, [])
 
   const sessionId = session?.session_id
@@ -109,7 +123,7 @@ export function AccountAuthDialog({
     setPollError('')
     setBusy(true)
     try {
-      acceptSession(await startAccountAuth(name.trim(), tier))
+      acceptSession(await startAccountAuth(name.trim(), tier, proxyId || null))
       setCode('')
       setCopied(false)
     } catch (err) {
@@ -190,6 +204,14 @@ export function AccountAuthDialog({
             <select id="account-auth-tier" value={tier} onChange={(e) => setTier(e.target.value)} disabled={busy} className={inputClass}>
               <option value="pro">Pro</option><option value="pro+">Pro+</option><option value="free">Free</option>
             </select>
+          </div>
+          <div>
+            <label htmlFor="account-auth-proxy" className="mb-1.5 block text-sm text-ink">该账号专属代理</label>
+            <select id="account-auth-proxy" value={proxyId} onChange={(e) => setProxyId(e.target.value)} disabled={busy} className={inputClass}>
+              <option value="">沿用服务器网络</option>
+              {proxies.map((proxy) => <option key={proxy.proxy_id} value={proxy.proxy_id}>{proxy.name} · {proxy.endpoint}</option>)}
+            </select>
+            <p className="mt-1 text-xs text-muted">新账号授权请求也会使用这里选择的代理。</p>
           </div>
           <button type="submit" disabled={busy} className={`${buttonClass} w-full bg-accent text-on-accent hover:bg-accent-hover`}>
             {busy && <LoaderCircle aria-hidden="true" className="h-4 w-4 animate-spin motion-reduce:animate-none" />}

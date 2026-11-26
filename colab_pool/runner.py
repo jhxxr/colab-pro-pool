@@ -16,6 +16,7 @@ from typing import Any
 from .config import PoolSettings
 from .db import PoolDatabase
 from .pool_manager import AccountPoolManager
+from .proxy_config import redact_proxy_credentials
 from .remote_bootstrap import KERNEL_BOOTSTRAP_TEMPLATE, build_job_bundle
 from .resources import sanitize_runtime_info
 from .utils import safe_extract_tar
@@ -582,7 +583,9 @@ class ColabJobScheduler:
                         line_bytes = await proc.stdout.readline()
                         if not line_bytes:
                             break
-                        line = line_bytes.decode("utf-8", errors="replace")
+                        line = redact_proxy_credentials(
+                            line_bytes.decode("utf-8", errors="replace")
+                        )
                         collected.append(line)
                         if job_id:
                             runtime_match = RUNTIME_MARKER_RE.match(line.strip())

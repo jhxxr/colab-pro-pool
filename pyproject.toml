@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "colab-pro-pool"
-version = "0.1.0"
+version = "0.2.0"
 description = "Multi-account Google Colab Pro GPU/TPU orchestrator & MCP server for AI agents"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -25,11 +25,8 @@ dev = [
 ]
 
 [project.scripts]
-cpool = "colab_pool.cli:main"
-colab-pool = "colab_pool.cli:main"
 colab-pool-server = "colab_pool.api:main"
 colab-pool-mcp = "colab_pool.mcp_server:main"
-colab-pool-client = "colab_pool.client_cli:main"
 
 [tool.setuptools.packages.find]
 include = ["colab_pool*"]

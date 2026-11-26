@@ -83,19 +83,6 @@ export function ConnectPage({
     2
   )
 
-  const cliCmd = `# 1. 登录并持久化配置（支持多服务器 --profile）
-cpool login ${origin} --api-key "${apiKeyDisplay}"
-
-# 2. 查看算力池与账号状态（加 --json 便于脚本解析）
-cpool status
-
-# 3. 提交本地项目（支持 .cpoolignore），走 SSE 实时看日志并自动拉取产物
-cpool run ./my_experiment -e train.py --gpu A100 --pip einops --wait -o ./downloaded_outputs
-
-# 4. 实时跟踪已有任务或只拉取单个产物文件
-cpool logs <job_id> -f
-cpool pull <job_id> ./res --file metrics.json`
-
   const handleSaveKey = async (e: React.FormEvent) => {
     e.preventDefault()
     setSaving(true)
@@ -120,7 +107,7 @@ cpool pull <job_id> ./res --file metrics.json`
       <div>
         <h1 className="page-title">本地连接与 Agent 接入</h1>
         <p className="page-description">
-          基于当前控制台地址（<code className="font-mono text-secondary">{origin}</code>）自动生成本地隧道、MCP 与 CLI 配置
+          基于当前控制台地址（<code className="font-mono text-secondary">{origin}</code>）自动生成本地隧道与 MCP 配置
         </p>
       </div>
 
@@ -189,12 +176,8 @@ cpool pull <job_id> ./res --file metrics.json`
         </div>
       </SectionCard>
 
-      <SectionCard title="3. 主力命令行工具 (cpool / colab-pool) 快速上手">
-        <CopyBlock title="持久化登录、实时 SSE 日志流与单文件拉取" code={cliCmd} />
-      </SectionCard>
-
       <SectionCard
-        title="4. 当前浏览器 API Key 会话"
+        title="3. 当前浏览器 API Key 会话"
         subtitle={authRequired ? '当前服务端要求 API Key 鉴权' : '当前服务端未强制开启 API Key（公开模式）'}
       >
         <form onSubmit={handleSaveKey} className="flex flex-wrap items-end gap-3">

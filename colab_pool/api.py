@@ -40,8 +40,9 @@ from . import __version__
 from .account_auth import AccountAuthManager, AuthSessionError
 from .account_usage import AccountUsageManager
 from .config import PoolSettings
-from .db import PoolDatabase
+from .db import AccountBusyError, PoolDatabase
 from .pool_manager import AccountPoolManager
+from .proxy_config import proxy_summary, validate_proxy_url
 from .runner import ColabJobScheduler
 from .resources import build_resource_catalog
 from .utils import (
@@ -113,6 +114,17 @@ class JobRetryRequest(BaseModel):
 class AccountRegisterRequest(BaseModel):
     name: str = Field(..., description="Account slot identifier, e.g. 'pro_01'")
     tier: str = Field("pro", description="Subscription tier: 'pro', 'pro+', or 'free'")
+    proxy_id: str | None = Field(default=None, description="Optional assigned proxy ID")
+
+
+class ProxyCreateRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=64)
+    url: SecretStr = Field(..., description="HTTP(S) proxy URL, optionally with credentials")
+
+
+class ProxyUpdateRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=64)
+    url: SecretStr | None = Field(default=None, description="Replace proxy URL when provided")
 
 
 class AccountResetRequest(BaseModel):
@@ -127,6 +139,7 @@ class AccountUpdateRequest(BaseModel):
     tier: str | None = Field(default=None, description="Subscription tier: 'pro', 'pro+', or 'free'")
     enabled: bool | None = Field(default=None, description="Enable or disable this account slot")
     clear_cooldown: bool = Field(default=False, description="Clear cooldown and error state")
+    proxy_id: str | None = Field(default=None, description="Assigned proxy ID; null removes assignment")
 
 
 def _extract_token(authorization: str | None, x_api_key: str | None) -> str:
@@ -135,6 +148,11 @@ def _extract_token(authorization: str | None, x_api_key: str | None) -> str:
     if x_api_key:
         return x_api_key.strip()
     return ""
+
+
+def _model_fields_set(model: BaseModel) -> set[str]:
+    fields = getattr(model, "model_fields_set", None)
+    return fields if fields is not None else getattr(model, "__fields_set__", set())
 
 
 def _build_job_record(
@@ -274,6 +292,12 @@ def create_app(settings: PoolSettings | None = None) -> FastAPI:
                 detail=f"Drive profile '{profile}' does not exist in {cfg.drives_dir}.",
             )
 
+    def _validate_proxy_name(name: str) -> str:
+        normalized = name.strip()
+        if not normalized or any(ord(char) < 32 for char in normalized):
+            raise HTTPException(status_code=400, detail="代理名称不能为空或包含控制字符。")
+        return normalized
+
     @app.get("/healthz")
     async def healthz() -> dict[str, Any]:
         stats = db.get_stats()
@@ -319,6 +343,59 @@ def create_app(settings: PoolSettings | None = None) -> FastAPI:
             "drive_profiles": pool.list_drive_profiles(),
         }
 
+    @app.get("/api/v1/proxies", dependencies=[Depends(verify_api_key)])
+    async def list_proxies() -> dict[str, Any]:
+        # Database records contain proxy credentials; only expose safe summaries.
+        return {"proxies": [proxy_summary(item) for item in db.list_proxies()]}
+
+    @app.post("/api/v1/proxies", status_code=201, dependencies=[Depends(verify_api_key)])
+    async def create_proxy(req: ProxyCreateRequest) -> dict[str, Any]:
+        try:
+            proxy_url = validate_proxy_url(req.url.get_secret_value())
+            created = db.create_proxy(
+                uuid.uuid4().hex, _validate_proxy_name(req.name), proxy_url
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return proxy_summary(created)
+
+    @app.patch("/api/v1/proxies/{proxy_id}", dependencies=[Depends(verify_api_key)])
+    async def update_proxy(proxy_id: str, req: ProxyUpdateRequest) -> dict[str, Any]:
+        fields_set = _model_fields_set(req)
+        name = _validate_proxy_name(req.name) if req.name is not None else None
+        proxy_url: str | None = None
+        if "url" in fields_set and req.url is not None:
+            try:
+                proxy_url = validate_proxy_url(req.url.get_secret_value())
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        existing_proxy = db.get_proxy(proxy_id)
+        if (
+            proxy_url is not None and existing_proxy is not None
+            and proxy_url != existing_proxy["proxy_url"]
+            and account_auth.is_proxy_in_use(proxy_id)
+        ):
+            raise HTTPException(status_code=409, detail="该代理正用于账号授权，请稍后再修改地址。")
+        try:
+            updated = db.update_proxy(proxy_id, name=name, proxy_url=proxy_url)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if updated is None:
+            raise HTTPException(status_code=404, detail="代理不存在。")
+        return proxy_summary(updated)
+
+    @app.delete("/api/v1/proxies/{proxy_id}", dependencies=[Depends(verify_api_key)])
+    async def delete_proxy(proxy_id: str) -> dict[str, Any]:
+        if account_auth.is_proxy_in_use(proxy_id):
+            raise HTTPException(status_code=409, detail="该代理正用于账号授权，请稍后再删除。")
+        try:
+            deleted = db.delete_proxy(proxy_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if not deleted:
+            raise HTTPException(status_code=404, detail="代理不存在。")
+        return {"deleted": proxy_id}
+
     @app.get("/api/v1/resources", dependencies=[Depends(verify_api_key)])
     async def list_resources() -> dict[str, Any]:
         pool.sync_accounts_from_disk()
@@ -328,8 +405,14 @@ def create_app(settings: PoolSettings | None = None) -> FastAPI:
     @app.post("/api/v1/accounts", dependencies=[Depends(verify_api_key)])
     async def register_account(req: AccountRegisterRequest) -> dict[str, Any]:
         _ensure_not_authorizing(req.name)
+        if req.proxy_id is not None and db.get_proxy(req.proxy_id) is None:
+            raise HTTPException(status_code=400, detail="所选代理不存在，请刷新列表后重试。")
         try:
             acct = pool.register_account_dir(req.name, req.tier)
+            if req.proxy_id is not None:
+                acct = pool.update_account(req.name, proxy_id=req.proxy_id, set_proxy=True) or acct
+        except AccountBusyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         scheduler.notify_new_job()
@@ -344,6 +427,12 @@ def create_app(settings: PoolSettings | None = None) -> FastAPI:
         # A usage query can refresh credentials. Stop it before replacing them.
         await account_usage.cancel(req.name)
         try:
+            fields_set = _model_fields_set(req)
+            if "proxy_id" in fields_set:
+                return account_auth.start(
+                    req.name, req.tier, proxy_id=req.proxy_id,
+                    reuse_existing_proxy=False,
+                )
             return account_auth.start(req.name, req.tier)
         except AuthSessionError as exc:
             raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
@@ -383,13 +472,27 @@ def create_app(settings: PoolSettings | None = None) -> FastAPI:
     @app.patch("/api/v1/accounts/{name}", dependencies=[Depends(verify_api_key)])
     async def update_account(name: str, req: AccountUpdateRequest) -> dict[str, Any]:
         _ensure_not_authorizing(name)
+        fields_set = _model_fields_set(req)
+        set_proxy = "proxy_id" in fields_set
+        if set_proxy:
+            current = db.get_account(name)
+            if current is None:
+                raise HTTPException(status_code=404, detail=f"Account '{name}' not found.")
+            if req.proxy_id != current.get("proxy_id") and current.get("status") in {"busy", "maintenance"}:
+                raise HTTPException(status_code=409, detail="账号正在运行或维护，暂不能更改代理。")
+            if req.proxy_id is not None and db.get_proxy(req.proxy_id) is None:
+                raise HTTPException(status_code=400, detail="所选代理不存在，请刷新列表后重试。")
         try:
             updated = pool.update_account(
                 name,
                 tier=req.tier,
                 enabled=req.enabled,
                 clear_cooldown=req.clear_cooldown,
+                proxy_id=req.proxy_id,
+                set_proxy=set_proxy,
             )
+        except AccountBusyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         if updated is None:

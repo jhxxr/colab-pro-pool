@@ -9,6 +9,7 @@ import type {
   JobLogsResponse,
   JobSubmitPayload,
   PoolStats,
+  ProxyConfig,
   ResourcesResponse,
   RuntimeHardware,
   WorkspaceInspectResponse,
@@ -126,6 +127,35 @@ export async function fetchAccounts(): Promise<AccountsResponse> {
   return requestJson<AccountsResponse>('/api/v1/accounts')
 }
 
+export async function fetchProxies(): Promise<{ proxies: ProxyConfig[] }> {
+  return requestJson<{ proxies: ProxyConfig[] }>('/api/v1/proxies')
+}
+
+export async function createProxy(input: { name: string; url: string }): Promise<ProxyConfig> {
+  return requestJson<ProxyConfig>('/api/v1/proxies', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+}
+
+export async function updateProxy(
+  proxyId: string,
+  patch: { name?: string; url?: string }
+): Promise<ProxyConfig> {
+  return requestJson<ProxyConfig>(`/api/v1/proxies/${encodeURIComponent(proxyId)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  })
+}
+
+export async function deleteProxy(proxyId: string): Promise<{ deleted: string }> {
+  return requestJson<{ deleted: string }>(`/api/v1/proxies/${encodeURIComponent(proxyId)}`, {
+    method: 'DELETE',
+  })
+}
+
 export async function fetchResources(): Promise<ResourcesResponse> {
   return requestJson<ResourcesResponse>('/api/v1/resources')
 }
@@ -148,11 +178,15 @@ export async function registerAccount(name: string, tier: string): Promise<Accou
   })
 }
 
-export async function startAccountAuth(name: string, tier: string): Promise<AccountAuthSession> {
+export async function startAccountAuth(
+  name: string, tier: string, proxyId?: string | null
+): Promise<AccountAuthSession> {
+  const body: { name: string; tier: string; proxy_id?: string | null } = { name, tier }
+  if (proxyId !== undefined) body.proxy_id = proxyId
   return requestJson<AccountAuthSession>('/api/v1/account-auth', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name, tier }),
+    body: JSON.stringify(body),
   })
 }
 
@@ -176,7 +210,7 @@ export async function cancelAccountAuth(sessionId: string): Promise<AccountAuthS
 
 export async function updateAccount(
   name: string,
-  patch: { tier?: string; enabled?: boolean; clear_cooldown?: boolean }
+  patch: { tier?: string; enabled?: boolean; clear_cooldown?: boolean; proxy_id?: string | null }
 ): Promise<Account> {
   return requestJson<Account>(`/api/v1/accounts/${encodeURIComponent(name)}`, {
     method: 'PATCH',

@@ -51,9 +51,21 @@ export interface Account {
   total_failures: number
   last_error: string
   enabled: number | boolean
+  proxy_id: string | null
+  proxy_name: string | null
   auth_configured: boolean
   usage: AccountUsage
   runtime: AccountRuntime | null
+}
+
+export interface ProxyConfig {
+  proxy_id: string
+  name: string
+  endpoint: string
+  has_auth: boolean
+  assigned_accounts: number
+  created_at: number
+  updated_at: number
 }
 
 export interface DriveProfile {
@@ -225,6 +237,7 @@ export interface AccountAuthSession {
   session_id: string
   name: string
   tier: string
+  proxy_id: string | null
   status: 'starting' | 'awaiting_code' | 'verifying' | 'succeeded' | 'failed' | 'expired' | 'cancelled'
   authorization_url: string | null
   created_at: number

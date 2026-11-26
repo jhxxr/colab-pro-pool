@@ -13,7 +13,7 @@ cleanup() {
 trap cleanup EXIT
 
 docker run --rm --entrypoint colab "${IMAGE}" --help >/dev/null
-docker run --rm --entrypoint cpool "${IMAGE}" --help >/dev/null
+docker run --rm -i --entrypoint python "${IMAGE}" - < "$(dirname "$0")/smoke_mcp.py"
 docker run --rm --entrypoint rclone "${IMAGE}" version
 
 docker run -d --name "${CONTAINER}" \

@@ -13,6 +13,7 @@ import { ConnectPage } from './pages/ConnectPage'
 import { JobDetailPage } from './pages/JobDetailPage'
 import { JobsPage } from './pages/JobsPage'
 import { OverviewPage } from './pages/OverviewPage'
+import { ProxiesPage } from './pages/ProxiesPage'
 import { ResourcesPage } from './pages/ResourcesPage'
 import { SubmitPage } from './pages/SubmitPage'
 import type { HealthStatus, JobSubmitPayload } from './types'
@@ -23,6 +24,7 @@ type RouteState =
   | { tab: 'submit' }
   | { tab: 'resources' }
   | { tab: 'accounts' }
+  | { tab: 'proxies' }
   | { tab: 'connect' }
 
 function parseLocationRoute(): RouteState {
@@ -35,6 +37,7 @@ function parseLocationRoute(): RouteState {
   }
   if (path === '/submit') return { tab: 'submit' }
   if (path === '/accounts') return { tab: 'accounts' }
+  if (path === '/proxies') return { tab: 'proxies' }
   if (path === '/resources') return { tab: 'resources' }
   if (path === '/connect') return { tab: 'connect' }
   return { tab: 'overview' }
@@ -173,6 +176,7 @@ function AppShell() {
         />
       )}
       {route.tab === 'accounts' && <AccountsPage />}
+      {route.tab === 'proxies' && <ProxiesPage />}
       {route.tab === 'resources' && <ResourcesPage onSelect={(preset) => {
         setSubmitPreset(preset)
         navigate({ tab: 'submit' })

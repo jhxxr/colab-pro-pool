@@ -1,6 +1,6 @@
 # Colab Pro Pool — 多 Pro 账号云端算力池调度系统（Web 控制台 + AI Agent）
 
-面向课题组与自动化研发工作流的多 Google Colab Pro / Pro+ 账号池中心调度服务端。将多个付费 Pro 账号集中托管在一台 Linux 服务器上，提供 **一体化 Web 控制台**、**标准 MCP 工具协议**、**HTTP REST API** 与 **CLI 客户端**。
+面向课题组与自动化研发工作流的多 Google Colab Pro / Pro+ 账号池中心调度服务端。将多个付费 Pro 账号集中托管在一台 Linux 服务器上，提供 **一体化 Web 控制台**、**标准 MCP 工具协议**、**HTTP REST API**。本地 Agent 统一通过 MCP 接入，不再提供独立 CLI 客户端；服务端仍依赖官方 `google-colab-cli` 管理 Colab 实例。
 
 ## 核心特性
 
@@ -9,6 +9,7 @@
 3. **一体化 Web 控制面板（单端口 `8080` 托管）**：
    - **算力总览与槽位矩阵**：实时查看空闲/忙碌/冷却倒计时、成功率和 GPU 分布，支持网页启停账号、修改套餐、解除冷却、扫描同步与一键清理孤儿实例。
    - **网页添加与授权账号**：点击“添加账号”生成 Google 授权链接，在浏览器完成授权后粘贴授权码，即可自动保存凭据并加入账号池；支持重新授权、取消、超时释放与刷新页面后恢复授权会话。
+   - **账号级代理管理**：在“代理管理”页面维护 HTTP(S) 代理并逐账号分配；首次授权、CU 查询、Colab CLI 任务及孤儿清理会使用账号代理，代理认证信息不会通过 API 返回。
    - **CU 余额与每小时消耗**：总览和账号页直接显示各账号剩余 CU、当前消耗速率（CU/h）、运行实例数与更新时间；支持每分钟自动更新和手动刷新。
    - **运行型号与配置价格目录**：账号卡片和任务详情展示实测 GPU、显存、vCPU、系统内存和磁盘；“型号与价格”列出 CPU、GPU 和 TPU 参考配置，保存本池各配置的实测 CU/h，并可按自填的每 CU 成本在小字中换算货币费用。
    - **SSE 实时终端日志 & 产物浏览器**：支持关键词过滤、日志下载，以及训练图像（PNG/JPG/SVG）和指标文件（JSON/CSV/TXT）网页直接预览。
@@ -30,7 +31,7 @@ docker compose pull
 docker compose up -d --no-build
 ```
 
-镜像为 `ghcr.io/jhxxr/colab-pro-pool:latest`，同时提供 `linux/amd64` 与 `linux/arm64`。生产环境可在 `.env` 中通过 `COLAB_POOL_IMAGE=ghcr.io/jhxxr/colab-pro-pool:v0.1.0` 固定版本。更新时重新执行上面的 `pull` 和 `up` 命令。
+镜像为 `ghcr.io/jhxxr/colab-pro-pool:latest`，同时提供 `linux/amd64` 与 `linux/arm64`。生产环境可在 `.env` 中通过 `COLAB_POOL_IMAGE=ghcr.io/jhxxr/colab-pro-pool:v0.2.0` 固定版本。更新时重新执行上面的 `pull` 和 `up` 命令。
 
 需要自行构建时执行 `docker compose up -d --build`。`Dockerfile` 采用多阶段构建，自动编译 `frontend/` 并打入 FastAPI 静态目录，内置健康检查与固定版本的官方 `google-colab-cli`。
 
@@ -59,6 +60,8 @@ pip install -e .
 
 授权过程使用临时隔离目录，新账号成功后才注册；已有账号重新授权时进入 `maintenance`，与任务调度和孤儿清理互斥。失败或取消会保留旧凭据与启停状态。OAuth 凭据通过项目提供的 CLI keyring 后端独立写入各账号的 `.config/colab-cli/pool-oauth.json`（明文文件，POSIX 权限 `0600`），不依赖宿主机共享钥匙串。已有账号目录中的旧 `token.json` 会由 CLI 迁移到新存储；曾仅写入系统钥匙串的账号需要逐个重新授权。
 
+可先在 Web 控制台“代理管理”中添加 `http://` 或 `https://` 代理，再为账号分配。添加新账号或重新授权时，也可直接选择代理；带认证代理使用 `scheme://user:password@host:port` 格式，页面/API 只展示脱敏端点。认证信息以 URL 形式保存在服务端 SQLite（未加密），POSIX 下数据库/WAL 文件会限制为仅所有者可读写；仍请保护数据目录与备份。未分配专属代理的账号沿用服务进程的网络环境。代理可以分散服务器出口，但不能保证避免 Google 的风控或替代遵守平台规则。
+
 也可在服务器终端依次初始化账号：
 
 ```bash
@@ -69,7 +72,7 @@ pip install -e .
 
 > **防坑提示**：把终端打印的 Google 授权链接复制到本地浏览器打开时，**必须勾选页面上的全部 4 个权限复选框**，漏勾任一项都会触发每小时强制掉线重登（[google-colab-cli Issue #116](https://github.com/googlecolab/google-colab-cli/issues/116)）。
 
-授权 API（沿用控制台 API Key）：`POST /api/v1/account-auth` 发起，`GET /api/v1/account-auth/{session_id}` 查询，`POST /api/v1/account-auth/{session_id}/code` 提交 `{"code":"..."}`，`DELETE /api/v1/account-auth/{session_id}` 取消。授权码和 token 不返回给前端，也不写入服务日志。可用 `COLAB_POOL_AUTH_TIMEOUT_SECONDS` 调整会话时限，用 `COLAB_POOL_AUTH_STARTUP_TIMEOUT_SECONDS` 调整 CLI 生成链接的等待时间（默认 30 秒）。
+授权 API（沿用控制台 API Key）：`POST /api/v1/account-auth` 发起，`GET /api/v1/account-auth/{session_id}` 查询，`POST /api/v1/account-auth/{session_id}/code` 提交 `{"code":"..."}`，`DELETE /api/v1/account-auth/{session_id}` 取消。授权码和 token 不返回给前端，也不写入服务日志。可用 `COLAB_POOL_AUTH_TIMEOUT_SECONDS` 调整会话时限，用 `COLAB_POOL_AUTH_STARTUP_TIMEOUT_SECONDS` 调整生成授权链接的等待时间（默认 30 秒）。
 
 账号列表中的 `usage` 包含 `remaining_cu`、`consumption_rate_hourly`（CU/h）、`active_assignments`、`updated_at`、`checked_at`、`refreshing`、`stale` 与 `error`。数据来自官方 `colab --auth oauth2 usage`，需要支持 `usage` 的新版 `google-colab-cli`。消耗速率为该 Google 账号所有运行实例的合计，包含控制台之外开启的机器；查询本身不会分配或停止运行实例。
 
@@ -110,13 +113,13 @@ Web 控制台、HTTP REST API、SSE 日志流与 MCP 接口全部托管在同一
    ```bash
    ssh -N -L 8080:127.0.0.1:8080 user@your-server-ip
    ```
-3. 本地浏览器访问 **`http://127.0.0.1:8080`**，输入 `COLAB_POOL_API_KEY` 解锁控制台；MCP 与 CLI 的 `COLAB_POOL_SERVER_URL` 填 `http://127.0.0.1:8080`。
+3. 本地浏览器访问 **`http://127.0.0.1:8080`**，输入 `COLAB_POOL_API_KEY` 解锁控制台；MCP 的 `COLAB_POOL_SERVER_URL` 填 `http://127.0.0.1:8080`。
 
 ### 方式二：Tailscale / 内网组网（课题组多人共用）
 
 1. 服务器与个人电脑均接入 Tailscale（服务器获得固定内网 IP 如 `100.88.x.x`）。
 2. 服务器设置 `COLAB_POOL_BIND_ADDR=0.0.0.0` 并通过防火墙仅对 `tailscale0` 网卡放行 `8080`。
-3. 组内成员浏览器、MCP、CLI 直接连接 `http://100.88.x.x:8080`。
+3. 组内成员浏览器与 MCP 直接连接 `http://100.88.x.x:8080`。
 
 ### 方式三：域名 + Caddy HTTPS 反向代理（公网访问）
 
@@ -132,7 +135,7 @@ colab-pool.yourdomain.com {
 
 ---
 
-## AI Agent 与 CLI 接入
+## AI Agent MCP 接入
 
 ### MCP Server（Claude Code / Hermes Agent / Cursor / Codex）
 
@@ -152,34 +155,7 @@ colab-pool.yourdomain.com {
 
 内置 7 个 MCP 工具：`colab_pool_status`、`submit_colab_job`、`list_colab_jobs`、`get_colab_job`、`retry_colab_job`、`download_colab_artifacts`、`cancel_colab_job`。
 
-### 主力 CLI 客户端（`cpool` / `colab-pool`）
-
-安装本包后即可直接使用短命令 `cpool`（或别名 `colab-pool`），支持持久化登录档案（`~/.config/colab-pool/config.json`）、`.cpoolignore` 打包忽略、表格展示与 `--json` 脚本模式、SSE 实时日志流及账号池运维：
-
-```bash
-# 1. 建立 SSH 隧道（或在另一个终端窗口启动）
-cpool tunnel user@your-linux-server-ip
-
-# 2. 登录并持久化服务端地址与 API Key（支持多环境 --profile）
-cpool login http://127.0.0.1:8080 --api-key "your-strong-secret-key"
-
-# 3. 查看算力池状态与账号矩阵
-cpool status
-
-# 4. 提交本地脚本或项目目录（自动忽略 .git / venv / .cpoolignore），走 SSE 实时看日志并拉取产物
-cpool run ./my_experiment -e train.py --gpu A100 --priority 10 --pip einops --wait -o ./downloaded_outputs
-
-# 5. 一行代码快速上卡执行
-cpool exec -c "import torch; print(torch.cuda.get_device_name(0))" --gpu T4
-
-# 6. 追踪任意任务、单独拉取某个输出文件或管理账号池
-cpool logs <job_id> -f
-cpool wait <job_id> -o ./downloaded_outputs
-cpool pull <job_id> ./res --file metrics.json
-cpool accounts cleanup
-```
-
-（原有 `colab-pool-client` 入口继续保留兼容。）
+使用 `submit_colab_job` 的 `local_workspace_dir` 提交本地项目时，仍支持 `.cpoolignore` 排除数据集、检查点等大文件；默认跳过 `.git`、虚拟环境与依赖缓存。使用 `get_colab_job` 查看状态和日志，任务完成后调用 `download_colab_artifacts` 下载产物。
 
 ## 前端本地开发与自动化测试
 
@@ -217,8 +193,8 @@ git push origin v0.2.0
 
 也可在 GitHub Actions 的 **Release → Run workflow** 中从 `main` 手动发布当前项目版本，成功后会自动创建对应标签。版本格式为 `MAJOR.MINOR.PATCH`，标签必须为 `vMAJOR.MINOR.PATCH`；版本不一致或标签已指向其他提交时会拒绝发布。
 
-发布流程重新运行全部 CI，在原生 amd64 / arm64 runner 上构建并启动容器，检查官方 Colab CLI、Web 页面、健康端点和 API 鉴权，再推送 GHCR 镜像并合并双架构清单。镜像提供 `v0.2.0`、`0.2.0` 等版本标签；不低于现有 Latest 的版本还会更新 `latest`，补发旧版本不会覆盖最新版本。
+发布流程重新运行全部 CI，在原生 amd64 / arm64 runner 上构建并启动容器，检查 MCP Server、官方 Colab CLI、Web 页面、健康端点和 API 鉴权，再推送 GHCR 镜像并合并双架构清单。镜像提供 `v0.2.0`、`0.2.0` 等版本标签；不低于现有 Latest 的版本还会更新 `latest`，补发旧版本不会覆盖最新版本。
 
-镜像发布成功后自动创建正式 GitHub Release，上传包含生产前端的 `.whl` / `.tar.gz`、镜像清单、拉取说明及 `SHA256SUMS`。流程使用仓库自带的 `GITHUB_TOKEN`，无需额外配置 Docker Hub 密码或 PAT；工作流已声明所需的 `contents: write` 和 `packages: write` 权限。第三方 Actions 固定到提交 SHA，由 Dependabot 每周检查更新。
+镜像发布成功后自动创建正式 GitHub Release，上传包含生产前端与 MCP Server 的 `.whl` / `.tar.gz`、镜像清单、拉取说明及 `SHA256SUMS`。流程使用仓库自带的 `GITHUB_TOKEN`，无需额外配置 Docker Hub 密码或 PAT；工作流已声明所需的 `contents: write` 和 `packages: write` 权限。第三方 Actions 固定到提交 SHA，由 Dependabot 每周检查更新。
 
 GHCR 首次发布后，请在对应 package 的 **Package settings → Change visibility** 确认其为 **Public**，以便未登录 Docker 的用户拉取。仓库公开与 package 公开是独立设置。
