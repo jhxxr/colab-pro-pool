@@ -11,12 +11,12 @@ Use this skill whenever you need to run GPU/TPU training scripts, hyperparameter
 
 Ensure the following environment variables are set (ask the user only if missing):
 - `COLAB_POOL_SERVER_URL`: Base URL of the pool server (e.g. `http://10.0.0.5:8080`)
-- `COLAB_POOL_API_KEY`: Bearer token matching the server's `COLAB_POOL_API_KEY`
+- `COLAB_POOL_API_KEY`: Restricted `cpool_...` MCP key issued by the pool administrator in the console's MCP Keys page. Do not request the administrator key for normal Agent use.
 
 ## 2. Calling via MCP Tools
 
-1. **Check available Pro accounts & Drive profiles**:
-   Call `colab_pool_status` to inspect idle/busy/cooldown accounts (`T4`, `L4`, `A100` on `pro`; `H100`, `G4` on `pro+`) and pre-authorized `drive_profiles`.
+1. **Check allowance and permitted models**:
+   Call `colab_pool_status` to inspect `key.cu_remaining`, `allowed_models`, and idle/busy/cooldown counts. Submit only permitted models. A restricted key cannot use administrator Drive profiles or access other keys' jobs. Stop submitting when allowance is exhausted (`429`); model denial (`403`) requires selecting an allowed model, and invalid/disabled keys (`401`) require administrator assistance. Never bypass the quota using another submission or retry path.
 2. **Submit an experiment**:
    Call `submit_colab_job` with:
    - `entrypoint`: e.g. `"train.py"` or `"exp.ipynb"`
@@ -24,7 +24,7 @@ Ensure the following environment variables are set (ask the user only if missing
    - `gpu`: `"T4"` | `"L4"` | `"A100"` | `"H100"` | `"CPU"`
    - `pip_packages`: e.g. `["einops", "timm", "wandb"]`
    - `dataset_commands`: shell commands executed inside Colab's gigabit network before training (e.g. `["mkdir -p /content/data && curl -L https://.../data.tar.gz | tar -xz -C /content/data"]`)
-   - `drive_profile`: set to the user's rclone profile name (e.g. `"default"`) if the job needs `/content/drive/MyDrive` mounted non-interactively
+   - `drive_profile`: administrator-only rclone profile name; omit when using a restricted MCP key
    - `drive_sync_outputs_to`: optional Drive path (e.g. `"Experiments/run_01"`) to sync `/content/outputs` upon exit
 3. **Monitor & collect artifacts**:
    - Poll `get_colab_job(job_id=..., tail_lines=120)` every 15–30 seconds until `status` is `"succeeded"` or `"failed"`.

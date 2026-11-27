@@ -70,6 +70,20 @@ CREATE TABLE IF NOT EXISTS jobs (
 
 CREATE INDEX IF NOT EXISTS idx_jobs_status_created ON jobs(status, created_at);
 
+CREATE TABLE IF NOT EXISTS mcp_keys (
+    key_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    token_prefix TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    cu_limit REAL NOT NULL,
+    cu_used REAL NOT NULL DEFAULT 0,
+    allowed_models_json TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    last_used_at REAL
+);
+
 CREATE TABLE IF NOT EXISTS resource_observations (
     job_id TEXT PRIMARY KEY,
     resource_id TEXT NOT NULL,
@@ -159,6 +173,18 @@ class PoolDatabase:
                     )
                 if "runtime_info_json" not in existing_cols:
                     conn.execute("ALTER TABLE jobs ADD COLUMN runtime_info_json TEXT NOT NULL DEFAULT '{}';")
+                key_columns = {
+                    "mcp_key_id": "TEXT",
+                    "cu_used": "REAL NOT NULL DEFAULT 0",
+                    "cu_meter_at": "REAL",
+                    "cu_rate": "REAL",
+                    "cu_baseline_balance": "REAL",
+                    "cu_session_used": "REAL NOT NULL DEFAULT 0",
+                }
+                for column, definition in key_columns.items():
+                    if column not in existing_cols:
+                        conn.execute(f"ALTER TABLE jobs ADD COLUMN {column} {definition}")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_mcp_key ON jobs(mcp_key_id, status)")
                 account_cols = {
                     row[1] for row in conn.execute("PRAGMA table_info(accounts)")
                 }
@@ -587,6 +613,14 @@ class PoolDatabase:
         """Recover accounts & running jobs interrupted by an unexpected server restart."""
         now = time.time()
         with self._conn(immediate=True) as conn:
+            from .access_keys import settle_meter
+            for job in conn.execute("SELECT * FROM jobs WHERE cu_meter_at IS NOT NULL").fetchall():
+                settle_meter(conn, dict(job), now)
+                # No rate was ever confirmed: require administrator review rather
+                # than silently allowing repeated unaccounted provisioning.
+                if job["cu_rate"] is None:
+                    conn.execute("UPDATE mcp_keys SET enabled = 0 WHERE key_id = ?", (job["mcp_key_id"],))
+            conn.execute("UPDATE jobs SET cu_meter_at = NULL WHERE cu_meter_at IS NOT NULL")
             conn.execute(
                 """
                 UPDATE accounts
@@ -646,8 +680,12 @@ class PoolDatabase:
             return results
 
     def create_job(self, record: dict[str, Any]) -> dict[str, Any]:
-        payload = {"priority": 0, **record}
+        payload = {"priority": 0, "mcp_key_id": None, **record}
         with self._conn(immediate=True) as conn:
+            if payload["mcp_key_id"]:
+                from .access_keys import require_key_job
+                key = conn.execute("SELECT * FROM mcp_keys WHERE key_id = ?", (payload["mcp_key_id"],)).fetchone()
+                require_key_job(dict(key) if key else None, payload)
             conn.execute(
                 """
                 INSERT INTO jobs (
@@ -655,13 +693,13 @@ class PoolDatabase:
                     script_args_json, pip_packages_json, dataset_commands_json,
                     env_vars_json, drive_profile, drive_subpath,
                     drive_sync_outputs_to, timeout_seconds, workspace_dir,
-                    log_path, created_at
+                    log_path, created_at, mcp_key_id
                 ) VALUES (
                     :job_id, :name, :status, :gpu, :tpu, :high_mem, :priority, :entrypoint,
                     :script_args_json, :pip_packages_json, :dataset_commands_json,
                     :env_vars_json, :drive_profile, :drive_subpath,
                     :drive_sync_outputs_to, :timeout_seconds, :workspace_dir,
-                    :log_path, :created_at
+                    :log_path, :created_at, :mcp_key_id
                 )
                 """,
                 payload,
@@ -701,9 +739,13 @@ class PoolDatabase:
         gpu: str | None = None,
         account: str | None = None,
         search: str | None = None,
+        mcp_key_id: str | None = None,
     ) -> tuple[str, list[Any]]:
         clauses: list[str] = []
         params: list[Any] = []
+        if mcp_key_id is not None:
+            clauses.append("mcp_key_id = ?")
+            params.append(mcp_key_id)
         if status and status.strip():
             clauses.append("status = ?")
             params.append(status.strip())
@@ -732,9 +774,10 @@ class PoolDatabase:
         account: str | None = None,
         search: str | None = None,
         offset: int = 0,
+        mcp_key_id: str | None = None,
     ) -> list[dict[str, Any]]:
         where_sql, params = self._build_job_filter_clause(
-            status=status, gpu=gpu, account=account, search=search
+            status=status, gpu=gpu, account=account, search=search, mcp_key_id=mcp_key_id
         )
         with self._conn(immediate=False) as conn:
             rows = conn.execute(
@@ -750,9 +793,10 @@ class PoolDatabase:
         gpu: str | None = None,
         account: str | None = None,
         search: str | None = None,
+        mcp_key_id: str | None = None,
     ) -> int:
         where_sql, params = self._build_job_filter_clause(
-            status=status, gpu=gpu, account=account, search=search
+            status=status, gpu=gpu, account=account, search=search, mcp_key_id=mcp_key_id
         )
         with self._conn(immediate=False) as conn:
             row = conn.execute(

@@ -31,7 +31,7 @@ docker compose pull
 docker compose up -d --no-build
 ```
 
-镜像为 `ghcr.io/jhxxr/colab-pro-pool:latest`，同时提供 `linux/amd64` 与 `linux/arm64`。生产环境可在 `.env` 中通过 `COLAB_POOL_IMAGE=ghcr.io/jhxxr/colab-pro-pool:v0.2.1` 固定版本。更新时重新执行上面的 `pull` 和 `up` 命令。
+镜像为 `ghcr.io/jhxxr/colab-pro-pool:latest`，同时提供 `linux/amd64` 与 `linux/arm64`。生产环境可在 `.env` 中通过 `COLAB_POOL_IMAGE=ghcr.io/jhxxr/colab-pro-pool:v0.3.0` 固定版本。更新时重新执行上面的 `pull` 和 `up` 命令。
 
 需要自行构建时执行 `docker compose up -d --build`。`Dockerfile` 采用多阶段构建，自动编译 `frontend/` 并打入 FastAPI 静态目录，内置健康检查与固定版本的官方 `google-colab-cli`。
 
@@ -137,6 +137,28 @@ colab-pool.yourdomain.com {
 
 ## AI Agent MCP 接入
 
+### 独立 MCP 密钥、CU 额度与机型权限
+
+服务端的 `COLAB_POOL_API_KEY` 是**管理员密钥**，用于登录控制台、管理账号和代理。给成员或 Agent 接入时，在控制台左侧 **MCP 密钥** 页面创建独立密钥，无需分发管理员密钥。
+
+- 每个密钥设置名称、**累计 CU 总额度**以及可使用的机型：`CPU`、`T4`、`L4`、`A100`、`H100`、`G4`、`v5e1`、`v6e1`，支持多选。TPU 通过任务的 `tpu` 字段选择，并优先于 `gpu`；高内存选项沿用相同机型权限。
+- 完整密钥形如 `cpool_...`，仅在创建成功时展示一次，可直接复制 MCP 配置；服务端只保存 SHA-256 哈希和展示前缀。丢失时停用旧密钥、创建新密钥。
+- 额度是累计总上限，没有自动重置周期。例如已用 20 CU，总额度从 100 调到 120 后剩余 100 CU。设置为 0 可阻止任务运行；增加总额度可续额，历史用量始终保留。
+- 各密钥只能查看、下载、取消、删除和重试自己提交的任务，不能管理账号、代理、其他密钥或访问管理员的云盘档案。管理员可以查看所有任务；从密钥任务发起的重试仍归原密钥计费和检查权限。
+- JSON 提交、文件上传、重试、出队调度和运行期间均检查权限。额度耗尽、停用密钥或收回正在使用的机型权限后，任务将停止；已排队任务也会重新检查。
+- 先设置管理员密钥才能创建 MCP 密钥。已有密钥的数据库即使误删管理员环境变量，也不会退回匿名访问。
+
+**CU 计量方式与边界：**服务器在分配前检查账号没有活动实例，分配后确认只有一个活动实例；采用官方 `colab usage` 返回的 CU/h 与实例占用时长估算（包含分配、上传、执行、下载和停止过程），并按观测到的账号 CU 余额减少向上校正。账号充值不返还已记账额度。不要在同一账号通过其他客户端另开实例；无法确认单实例用量或用量查询失败时，会停止受限任务。若分配后费率与最终余额均无法确认，则停用密钥，需管理员核查后恢复。
+
+密钥与任务 CU 用量写入 SQLite，多个并行任务共享该密钥的额度；删除任务不会退还额度。运行中约每秒检查一次权限与累计用量，约每 10 秒重新查询官方费率（单次查询受现有用量超时控制），达到额度后停止实例。由于 Google 用量采样、实例分配和停机均有延迟，**这不是精确到零超额的 Google 官方账单硬上限**，并行任务可能产生额外超额。异常重启按最后确认的费率估算到重启时刻，未能确认费率的未结任务会停用相关密钥，需管理员核查后恢复。若远端停止命令失败，会停用该密钥与账号，并在任务中标记 `RUNTIME_STOP_FAILED`，由管理员确认并清理远端实例后手动恢复；此时远端仍可能持续消耗 CU，账本只能保留停止尝试时的估算。
+
+密钥相关 API（前三项需要管理员密钥）：
+
+- `GET /api/v1/mcp-keys`：列出脱敏密钥与已用 / 剩余 CU。
+- `POST /api/v1/mcp-keys`：创建，提交 `{"name":"agent-a","cu_limit":100,"allowed_models":["T4","A100"]}`；响应仅此一次包含 `token`。
+- `PATCH /api/v1/mcp-keys/{key_id}`：修改 `name`、`cu_limit`、`allowed_models` 或 `enabled`。
+- `GET /api/v1/mcp/status`：使用 MCP 密钥查询自身额度、可用机型和池的汇总状态，不返回管理员账号明细或云盘档案。
+
 ### MCP Server（Claude Code / Hermes Agent / Cursor / Codex）
 
 ```json
@@ -146,7 +168,7 @@ colab-pool.yourdomain.com {
       "command": "colab-pool-mcp",
       "env": {
         "COLAB_POOL_SERVER_URL": "http://127.0.0.1:8080",
-        "COLAB_POOL_API_KEY": "your-strong-secret-key"
+        "COLAB_POOL_API_KEY": "cpool_替换为控制台创建的MCP密钥"
       }
     }
   }
@@ -154,6 +176,8 @@ colab-pool.yourdomain.com {
 ```
 
 内置 7 个 MCP 工具：`colab_pool_status`、`submit_colab_job`、`list_colab_jobs`、`get_colab_job`、`retry_colab_job`、`download_colab_artifacts`、`cancel_colab_job`。
+
+先调用 `colab_pool_status` 查看 `key.cu_remaining` 与 `allowed_models`，再选择允许的机型提交。密钥无权使用的机型返回 `403`；CU 额度耗尽返回 `429`；停用或无效密钥返回 `401`。旧管理员密钥仍可连接 MCP 以兼容单人使用，但不受成员额度和机型限制。
 
 使用 `submit_colab_job` 的 `local_workspace_dir` 提交本地项目时，仍支持 `.cpoolignore` 排除数据集、检查点等大文件；默认跳过 `.git`、虚拟环境与依赖缓存。使用 `get_colab_job` 查看状态和日志，任务完成后调用 `download_colab_artifacts` 下载产物。
 
@@ -181,19 +205,19 @@ python -m pytest -v
 
 - `pyproject.toml` 的 `project.version`
 - `colab_pool/__init__.py` 的 `__version__`
-- `frontend/package.json` 的 `version`（在 `frontend/` 执行 `npm version 0.2.1 --no-git-tag-version` 会同时更新 `package-lock.json`）
+- `frontend/package.json` 的 `version`（在 `frontend/` 执行 `npm version 0.3.0 --no-git-tag-version` 会同时更新 `package-lock.json`）
 
 随后推送对应的稳定版本标签：
 
 ```bash
-git tag -a v0.2.1 -m "Release v0.2.1"
+git tag -a v0.3.0 -m "Release v0.3.0"
 git push origin main
-git push origin v0.2.1
+git push origin v0.3.0
 ```
 
 也可在 GitHub Actions 的 **Release → Run workflow** 中从 `main` 手动发布当前项目版本，成功后会自动创建对应标签。版本格式为 `MAJOR.MINOR.PATCH`，标签必须为 `vMAJOR.MINOR.PATCH`；版本不一致或标签已指向其他提交时会拒绝发布。
 
-发布流程重新运行全部 CI，在原生 amd64 / arm64 runner 上构建并启动容器，检查 MCP Server、官方 Colab CLI、Web 页面、健康端点和 API 鉴权，再推送 GHCR 镜像并合并双架构清单。镜像提供 `v0.2.1`、`0.2.1` 等版本标签；不低于现有 Latest 的版本还会更新 `latest`，补发旧版本不会覆盖最新版本。
+发布流程重新运行全部 CI，在原生 amd64 / arm64 runner 上构建并启动容器，检查 MCP Server、官方 Colab CLI、Web 页面、健康端点和 API 鉴权，再推送 GHCR 镜像并合并双架构清单。镜像提供 `v0.3.0`、`0.3.0` 等版本标签；不低于现有 Latest 的版本还会更新 `latest`，补发旧版本不会覆盖最新版本。
 
 镜像发布成功后自动创建正式 GitHub Release，上传包含生产前端与 MCP Server 的 `.whl` / `.tar.gz`、镜像清单、拉取说明及 `SHA256SUMS`。流程使用仓库自带的 `GITHUB_TOKEN`，无需额外配置 Docker Hub 密码或 PAT；工作流已声明所需的 `contents: write` 和 `packages: write` 权限。第三方 Actions 固定到提交 SHA，由 Dependabot 每周检查更新。
 

@@ -8,6 +8,8 @@ import type {
   JobListResponse,
   JobLogsResponse,
   JobSubmitPayload,
+  McpKey,
+  McpKeyInput,
   PoolStats,
   ProxyConfig,
   ResourcesResponse,
@@ -129,6 +131,22 @@ export async function fetchAccounts(): Promise<AccountsResponse> {
 
 export async function fetchProxies(): Promise<{ proxies: ProxyConfig[] }> {
   return requestJson<{ proxies: ProxyConfig[] }>('/api/v1/proxies')
+}
+
+export async function fetchMcpKeys(): Promise<{ keys: McpKey[] }> {
+  return requestJson('/api/v1/mcp-keys')
+}
+
+export async function createMcpKey(input: McpKeyInput): Promise<McpKey & { token: string }> {
+  return requestJson('/api/v1/mcp-keys', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input),
+  })
+}
+
+export async function updateMcpKey(keyId: string, input: Partial<McpKeyInput> & { enabled?: boolean }): Promise<McpKey> {
+  return requestJson(`/api/v1/mcp-keys/${encodeURIComponent(keyId)}`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input),
+  })
 }
 
 export async function createProxy(input: { name: string; url: string }): Promise<ProxyConfig> {

@@ -52,7 +52,7 @@ export function ConnectPage({
 
   const origin = typeof window !== 'undefined' ? window.location.origin : 'http://127.0.0.1:8080'
   const port = typeof window !== 'undefined' && window.location.port ? window.location.port : '8080'
-  const apiKeyDisplay = newKey.trim() || 'your-strong-secret-key'
+  const apiKeyDisplay = 'cpool_替换为在_MCP密钥_页面创建的密钥'
 
   const sshCmd = `ssh -N -L ${port}:127.0.0.1:${port} user@your-linux-server-ip`
   const sshConfig = `Host colab-pool-srv
@@ -154,7 +154,7 @@ export function ConnectPage({
 
       <SectionCard
         title="2. AI Agent MCP 接入配置"
-        subtitle="适用于 Claude Code、Cursor、Codex、Hermes Agent 等客户端"
+        subtitle="先在「MCP 密钥」页面创建受限密钥，再替换配置中的 COLAB_POOL_API_KEY；适用于 Claude Code、Cursor、Codex、Hermes Agent 等客户端。"
       >
         <div className="space-y-4">
           <CopyBlock title="MCP Server 配置 JSON (~/.claude.json / mcp.json)" code={mcpJson} />

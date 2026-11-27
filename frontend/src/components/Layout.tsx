@@ -5,6 +5,7 @@ import {
   Cpu,
   FolderKanban,
   LayoutDashboard,
+  KeyRound,
   Menu,
   Microchip,
   Network,
@@ -16,7 +17,7 @@ import {
 } from 'lucide-react'
 import type { HealthStatus } from '../types'
 
-export type NavTab = 'overview' | 'jobs' | 'submit' | 'resources' | 'accounts' | 'proxies' | 'connect'
+export type NavTab = 'overview' | 'jobs' | 'submit' | 'resources' | 'accounts' | 'proxies' | 'keys' | 'connect'
 
 interface LayoutProps {
   activeTab: NavTab
@@ -33,6 +34,7 @@ const NAV_ITEMS: { id: NavTab; label: string; icon: typeof LayoutDashboard }[] =
   { id: 'resources', label: '型号与价格', icon: Microchip },
   { id: 'accounts', label: '账号与云盘', icon: Users },
   { id: 'proxies', label: '代理管理', icon: Network },
+  { id: 'keys', label: 'MCP 密钥', icon: KeyRound },
   { id: 'connect', label: '连接与接入', icon: Settings2 },
 ]
 
@@ -114,7 +116,7 @@ export function Layout({ activeTab, onNavigate, health, healthError, children }:
               <div><span className="block">运行 / 等待</span><span className="mt-1 block text-sm font-medium text-ink tabular-nums">{health.jobs_running + health.jobs_provisioning} <span className="font-normal text-muted">/ {health.jobs_queued}</span></span></div>
             </div>
           )}
-          <div className="mt-5 text-[11px] text-muted">Colab Pro Pool <span className="ml-1">{health?.version ?? '0.2.1'}</span></div>
+          <div className="mt-5 text-[11px] text-muted">Colab Pro Pool <span className="ml-1">{health?.version ?? '0.3.0'}</span></div>
         </div>
       </div>
     </div>

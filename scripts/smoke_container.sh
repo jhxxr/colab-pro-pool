@@ -53,5 +53,43 @@ request = Request(f"{base}/api/v1/accounts", headers={
 })
 with urlopen(request, timeout=5) as response:
     assert json.load(response)["accounts"] == []
-print("Container health, frontend and API authentication passed.")
+
+def api(path, *, method="GET", data=None, key=None):
+    request = Request(
+        f"{base}{path}",
+        data=json.dumps(data).encode() if data is not None else None,
+        headers={
+            "Authorization": f"Bearer {key or os.environ['COLAB_POOL_API_KEY']}",
+            "Content-Type": "application/json",
+        },
+        method=method,
+    )
+    with urlopen(request, timeout=5) as response:
+        return json.load(response)
+
+member = api("/api/v1/mcp-keys", method="POST", data={
+    "name": "container-smoke", "cu_limit": 1, "allowed_models": ["T4"],
+})
+member_key = member["token"]
+status = api("/api/v1/mcp/status", key=member_key)
+assert status["key"]["cu_remaining"] == 1
+assert status["allowed_models"] == ["T4"]
+for path, method, data, expected in (
+    ("/api/v1/accounts", "GET", None, 403),
+    ("/api/v1/jobs", "POST", {"gpu": "H100", "script_content": "pass"}, 403),
+):
+    try:
+        api(path, method=method, data=data, key=member_key)
+    except HTTPError as error:
+        assert error.code == expected, error.code
+    else:
+        raise AssertionError(f"Restricted MCP key bypassed {path}")
+api(f"/api/v1/mcp-keys/{member['key_id']}", method="PATCH", data={"cu_limit": 0})
+try:
+    api("/api/v1/jobs", method="POST", data={"script_content": "pass"}, key=member_key)
+except HTTPError as error:
+    assert error.code == 429, error.code
+else:
+    raise AssertionError("Exhausted MCP key accepted a job")
+print("Container health, frontend, API authentication, MCP key quotas and model permissions passed.")
 PY

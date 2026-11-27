@@ -39,6 +39,7 @@ from pydantic import BaseModel, Field, SecretStr, ValidationError
 from . import __version__
 from .account_auth import AccountAuthManager, AuthSessionError
 from .account_usage import AccountUsageManager
+from .access_keys import KeyPolicyError, McpKeyStore, normalize_models, require_key_job
 from .config import PoolSettings
 from .db import AccountBusyError, PoolDatabase
 from .pool_manager import AccountPoolManager
@@ -131,6 +132,19 @@ class AccountResetRequest(BaseModel):
     enabled: bool = Field(True, description="Enable or disable this account slot")
 
 
+class McpKeyCreateRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=64)
+    cu_limit: float = Field(..., description="Finite, non-negative lifetime CU allowance")
+    allowed_models: list[str] = Field(...)
+
+
+class McpKeyUpdateRequest(BaseModel):
+    name: str | None = Field(None, min_length=1, max_length=64)
+    cu_limit: float | None = Field(None, description="Finite, non-negative lifetime CU allowance")
+    allowed_models: list[str] | None = None
+    enabled: bool | None = None
+
+
 class AccountAuthCodeRequest(BaseModel):
     code: SecretStr = Field(..., description="One-time code from the Google authorization page")
 
@@ -153,6 +167,12 @@ def _extract_token(authorization: str | None, x_api_key: str | None) -> str:
 def _model_fields_set(model: BaseModel) -> set[str]:
     fields = getattr(model, "model_fields_set", None)
     return fields if fields is not None else getattr(model, "__fields_set__", set())
+
+
+def _public_job(job: dict[str, Any]) -> dict[str, Any]:
+    # In particular, an account's baseline balance is not the client's balance.
+    private = {"cu_meter_at", "cu_rate", "cu_baseline_balance", "cu_session_used"}
+    return {name: value for name, value in job.items() if name not in private}
 
 
 def _build_job_record(
@@ -196,6 +216,7 @@ def create_app(settings: PoolSettings | None = None) -> FastAPI:
     cfg = settings or PoolSettings.from_env()
     cfg.ensure_dirs()
     db = PoolDatabase(cfg.db_path)
+    keys = McpKeyStore(db)
     pool = AccountPoolManager(cfg, db)
     scheduler = ColabJobScheduler(cfg, db, pool)
     account_auth = AccountAuthManager(cfg, pool, scheduler.notify_new_job)
@@ -252,10 +273,11 @@ def create_app(settings: PoolSettings | None = None) -> FastAPI:
     app.state.scheduler = scheduler
     app.state.account_auth = account_auth
     app.state.account_usage = account_usage
+    app.state.mcp_keys = keys
 
     def _is_token_valid(token: str) -> bool:
         if not cfg.api_key:
-            return True
+            return not keys.list() and not token.startswith("cpool_")
         return hmac.compare_digest(
             token.encode("utf-8"), cfg.api_key.encode("utf-8")
         )
@@ -266,7 +288,55 @@ def create_app(settings: PoolSettings | None = None) -> FastAPI:
     ) -> None:
         token = _extract_token(authorization, x_api_key)
         if not _is_token_valid(token):
+            if keys.authenticate(token):
+                raise HTTPException(status_code=403, detail="此操作需要管理员密钥。")
             raise HTTPException(status_code=401, detail="Invalid or missing API key.")
+
+    def verify_job_key(
+        authorization: str | None = Header(default=None),
+        x_api_key: str | None = Header(default=None),
+    ) -> dict[str, Any] | None:
+        token = _extract_token(authorization, x_api_key)
+        # Even in legacy no-auth mode an explicitly supplied MCP key remains
+        # restricted. Once issued keys exist, anonymous access is closed.
+        key = keys.authenticate(token)
+        if key:
+            return key
+        if cfg.api_key and _is_token_valid(token):
+            return None
+        if not cfg.api_key and not token and not keys.list():
+            return None
+        raise HTTPException(status_code=401, detail="Invalid, disabled or missing API key.")
+
+    def verify_owned_job(job_id: str, key: dict[str, Any] | None = Depends(verify_job_key)) -> None:
+        job = db.get_job(job_id)
+        if job is None or (key and job.get("mcp_key_id") != key["key_id"]):
+            raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
+
+    def _check_job_policy(req: JobSubmitRequest, key: dict[str, Any] | None) -> None:
+        try:
+            if key:
+                require_key_job(keys.get(key["key_id"]), {
+                    "gpu": req.gpu, "tpu": req.tpu, "drive_profile": req.drive_profile,
+                })
+                model = normalize_models([req.tpu or req.gpu])[0]
+                if bool(req.tpu) != (model in {"v5e1", "v6e1"}):
+                    raise ValueError("TPU 型号请通过 tpu 字段指定，gpu 字段仅支持 GPU 或 CPU。")
+                if req.tpu:
+                    req.tpu, req.gpu = model, "CPU"
+                else:
+                    req.gpu = model
+        except KeyPolicyError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    def _create_job(record: dict[str, Any], key: dict[str, Any] | None) -> dict[str, Any]:
+        record["mcp_key_id"] = key["key_id"] if key else None
+        try:
+            return db.create_job(record)
+        except KeyPolicyError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
     def _safe_write_rel(root: Path, rel_path: str, data: bytes) -> Path:
         try:
@@ -322,8 +392,49 @@ def create_app(settings: PoolSettings | None = None) -> FastAPI:
     ) -> dict[str, Any]:
         token = _extract_token(authorization, x_api_key)
         return {
-            "auth_required": bool(cfg.api_key),
+            "auth_required": bool(cfg.api_key or keys.list()),
             "authenticated": _is_token_valid(token),
+        }
+
+    @app.get("/api/v1/mcp-keys", dependencies=[Depends(verify_api_key)])
+    async def list_mcp_keys() -> dict[str, Any]:
+        return {"keys": keys.list()}
+
+    @app.post("/api/v1/mcp-keys", status_code=201, dependencies=[Depends(verify_api_key)])
+    async def create_mcp_key(req: McpKeyCreateRequest) -> dict[str, Any]:
+        if not cfg.api_key:
+            raise HTTPException(status_code=409, detail="请先设置 COLAB_POOL_API_KEY 管理员密钥，再创建 MCP 密钥。")
+        try:
+            return keys.create(req.name, req.cu_limit, req.allowed_models)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.patch("/api/v1/mcp-keys/{key_id}", dependencies=[Depends(verify_api_key)])
+    async def update_mcp_key(key_id: str, req: McpKeyUpdateRequest) -> dict[str, Any]:
+        patch = {name: getattr(req, name) for name in _model_fields_set(req)}
+        if any(value is None for value in patch.values()):
+            raise HTTPException(status_code=400, detail="密钥设置不能为 null。")
+        try:
+            result = keys.update(key_id, patch)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if result is None:
+            raise HTTPException(status_code=404, detail="MCP 密钥不存在。")
+        scheduler.notify_new_job()
+        return result
+
+    @app.get("/api/v1/mcp/status")
+    async def mcp_status(key: dict[str, Any] | None = Depends(verify_job_key)) -> dict[str, Any]:
+        if key is None:
+            return {"accounts": account_usage.list_accounts(), "drive_profiles": pool.list_drive_profiles()}
+        stats = db.get_stats()
+        allowed = json.loads(key["allowed_models_json"])
+        return {
+            "key": keys.summary(keys.get(key["key_id"])),
+            "allowed_models": allowed,
+            "pool": {k: stats["accounts"][k] for k in ("idle", "busy", "cooldown")},
+            "drive_profiles": [],
+            "metering_note": "按官方 CU/h 和运行时长估算，按账号余额减少向上校正；额度耗尽会停止任务，查询和停机有延迟，可能少量超额。",
         }
 
     @app.get("/api/v1/stats", dependencies=[Depends(verify_api_key)])
@@ -542,8 +653,9 @@ def create_app(settings: PoolSettings | None = None) -> FastAPI:
         account_usage.refresh_all(force=True)
         return {"accounts": account_usage.list_accounts()}
 
-    @app.post("/api/v1/jobs", dependencies=[Depends(verify_api_key)])
-    async def submit_job_json(req: JobSubmitRequest) -> dict[str, Any]:
+    @app.post("/api/v1/jobs")
+    async def submit_job_json(req: JobSubmitRequest, key: dict[str, Any] | None = Depends(verify_job_key)) -> dict[str, Any]:
+        _check_job_policy(req, key)
         _validate_drive_profile(req.drive_profile)
 
         job_id = uuid.uuid4().hex[:12]
@@ -597,7 +709,7 @@ def create_app(settings: PoolSettings | None = None) -> FastAPI:
                 )
 
             record = _build_job_record(job_id, req, ws_dir, log_path)
-            created = db.create_job(record)
+            created = _create_job(record, key)
         except HTTPException:
             shutil.rmtree(job_dir, ignore_errors=True)
             raise
@@ -606,12 +718,13 @@ def create_app(settings: PoolSettings | None = None) -> FastAPI:
             raise
 
         scheduler.notify_new_job()
-        return created
+        return _public_job(created)
 
-    @app.post("/api/v1/jobs/upload", dependencies=[Depends(verify_api_key)])
+    @app.post("/api/v1/jobs/upload")
     async def submit_job_multipart(
         files: list[UploadFile] = File(..., description="Training script(s) or project files"),
         spec_json: str = Form("{}", description="JSON string matching JobSubmitRequest fields"),
+        key: dict[str, Any] | None = Depends(verify_job_key),
     ) -> dict[str, Any]:
         try:
             spec_dict = json.loads(spec_json)
@@ -621,6 +734,7 @@ def create_app(settings: PoolSettings | None = None) -> FastAPI:
         except (json.JSONDecodeError, ValidationError, TypeError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=f"Invalid spec_json: {exc}") from exc
 
+        _check_job_policy(req, key)
         _validate_drive_profile(req.drive_profile)
 
         job_id = uuid.uuid4().hex[:12]
@@ -657,7 +771,7 @@ def create_app(settings: PoolSettings | None = None) -> FastAPI:
                 )
 
             record = _build_job_record(job_id, req, ws_dir, log_path)
-            created = db.create_job(record)
+            created = _create_job(record, key)
         except HTTPException:
             shutil.rmtree(job_dir, ignore_errors=True)
             raise
@@ -666,9 +780,9 @@ def create_app(settings: PoolSettings | None = None) -> FastAPI:
             raise
 
         scheduler.notify_new_job()
-        return created
+        return _public_job(created)
 
-    @app.get("/api/v1/jobs", dependencies=[Depends(verify_api_key)])
+    @app.get("/api/v1/jobs")
     async def list_jobs(
         status: str | None = Query(None),
         gpu: str | None = Query(None),
@@ -676,6 +790,7 @@ def create_app(settings: PoolSettings | None = None) -> FastAPI:
         search: str | None = Query(None),
         limit: int = Query(50, ge=1, le=500),
         offset: int = Query(0, ge=0),
+        key: dict[str, Any] | None = Depends(verify_job_key),
     ) -> dict[str, Any]:
         jobs = db.list_jobs(
             status=status,
@@ -684,21 +799,23 @@ def create_app(settings: PoolSettings | None = None) -> FastAPI:
             search=search,
             limit=limit,
             offset=offset,
+            mcp_key_id=key["key_id"] if key else None,
         )
         total = db.count_jobs(
             status=status,
             gpu=gpu,
             account=account,
             search=search,
+            mcp_key_id=key["key_id"] if key else None,
         )
         return {
-            "jobs": jobs,
+            "jobs": [_public_job(job) for job in jobs],
             "total": total,
             "limit": limit,
             "offset": offset,
         }
 
-    @app.get("/api/v1/jobs/{job_id}", dependencies=[Depends(verify_api_key)])
+    @app.get("/api/v1/jobs/{job_id}", dependencies=[Depends(verify_owned_job)])
     async def get_job(job_id: str) -> dict[str, Any]:
         job = db.get_job(job_id)
         if job is None:
@@ -717,9 +834,9 @@ def create_app(settings: PoolSettings | None = None) -> FastAPI:
                 output_file_details.append({"path": rel, "size": p.stat().st_size})
         job["output_files"] = output_files
         job["output_file_details"] = output_file_details
-        return job
+        return _public_job(job)
 
-    @app.get("/api/v1/jobs/{job_id}/logs", dependencies=[Depends(verify_api_key)])
+    @app.get("/api/v1/jobs/{job_id}/logs", dependencies=[Depends(verify_owned_job)])
     async def get_job_logs(
         job_id: str,
         tail_lines: int = Query(200, ge=1, le=5000),
@@ -759,7 +876,7 @@ def create_app(settings: PoolSettings | None = None) -> FastAPI:
             "logs": text,
         }
 
-    @app.get("/api/v1/jobs/{job_id}/logs/stream", dependencies=[Depends(verify_api_key)])
+    @app.get("/api/v1/jobs/{job_id}/logs/stream", dependencies=[Depends(verify_owned_job)])
     async def stream_job_logs(
         job_id: str,
         offset: int = Query(0, ge=0),
@@ -853,14 +970,14 @@ def create_app(settings: PoolSettings | None = None) -> FastAPI:
             },
         )
 
-    @app.post("/api/v1/jobs/{job_id}/cancel", dependencies=[Depends(verify_api_key)])
+    @app.post("/api/v1/jobs/{job_id}/cancel", dependencies=[Depends(verify_owned_job)])
     async def cancel_job(job_id: str) -> dict[str, Any]:
         updated = await scheduler.cancel_job(job_id)
         if updated is None:
             raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
-        return updated
+        return _public_job(updated)
 
-    @app.post("/api/v1/jobs/{job_id}/retry", dependencies=[Depends(verify_api_key)])
+    @app.post("/api/v1/jobs/{job_id}/retry", dependencies=[Depends(verify_owned_job)])
     async def retry_job(
         job_id: str,
         req: JobRetryRequest | None = Body(default=None),
@@ -878,6 +995,16 @@ def create_app(settings: PoolSettings | None = None) -> FastAPI:
         overrides = req or JobRetryRequest()
         drive_profile = orig.get("drive_profile", "")
         _validate_drive_profile(drive_profile)
+        owner = keys.get(orig["mcp_key_id"]) if orig.get("mcp_key_id") else None
+        if orig.get("mcp_key_id"):
+            policy_req = JobSubmitRequest(
+                gpu=overrides.gpu if overrides.gpu is not None else orig["gpu"],
+                tpu=overrides.tpu if overrides.tpu is not None else orig.get("tpu", ""),
+                drive_profile=drive_profile,
+            )
+            if owner is None:
+                raise HTTPException(status_code=403, detail="原任务的 MCP 密钥不存在。")
+            _check_job_policy(policy_req, owner)
 
         new_job_id = uuid.uuid4().hex[:12]
         new_job_dir = cfg.jobs_dir / new_job_id
@@ -891,8 +1018,8 @@ def create_app(settings: PoolSettings | None = None) -> FastAPI:
                 "job_id": new_job_id,
                 "name": overrides.name or orig["name"],
                 "status": "queued",
-                "gpu": (overrides.gpu or orig["gpu"]).upper(),
-                "tpu": overrides.tpu if overrides.tpu is not None else orig.get("tpu", ""),
+                "gpu": policy_req.gpu if owner else (overrides.gpu or orig["gpu"]).upper(),
+                "tpu": policy_req.tpu if owner else (overrides.tpu if overrides.tpu is not None else orig.get("tpu", "")),
                 "high_mem": 1 if (overrides.high_mem if overrides.high_mem is not None else orig["high_mem"]) else 0,
                 "priority": overrides.priority if overrides.priority is not None else orig.get("priority", 0),
                 "entrypoint": orig["entrypoint"],
@@ -908,15 +1035,15 @@ def create_app(settings: PoolSettings | None = None) -> FastAPI:
                 "log_path": str(new_log),
                 "created_at": time.time(),
             }
-            created = db.create_job(record)
+            created = _create_job(record, owner)
         except Exception:
             shutil.rmtree(new_job_dir, ignore_errors=True)
             raise
 
         scheduler.notify_new_job()
-        return created
+        return _public_job(created)
 
-    @app.delete("/api/v1/jobs/{job_id}", dependencies=[Depends(verify_api_key)])
+    @app.delete("/api/v1/jobs/{job_id}", dependencies=[Depends(verify_owned_job)])
     async def delete_job(job_id: str) -> dict[str, Any]:
         job = db.get_job(job_id)
         if job is None:
@@ -933,7 +1060,7 @@ def create_app(settings: PoolSettings | None = None) -> FastAPI:
             shutil.rmtree(job_dir, ignore_errors=True)
         return {"deleted": job_id}
 
-    @app.get("/api/v1/jobs/{job_id}/artifacts", dependencies=[Depends(verify_api_key)])
+    @app.get("/api/v1/jobs/{job_id}/artifacts", dependencies=[Depends(verify_owned_job)])
     async def download_job_artifacts(job_id: str) -> FileResponse:
         job = db.get_job(job_id)
         if job is None:
@@ -950,7 +1077,7 @@ def create_app(settings: PoolSettings | None = None) -> FastAPI:
             filename=f"colab_job_{job_id}_outputs.tar.gz",
         )
 
-    @app.get("/api/v1/jobs/{job_id}/files/{file_path:path}", dependencies=[Depends(verify_api_key)])
+    @app.get("/api/v1/jobs/{job_id}/files/{file_path:path}", dependencies=[Depends(verify_owned_job)])
     async def get_job_output_file(job_id: str, file_path: str) -> FileResponse:
         job = db.get_job(job_id)
         if job is None:
@@ -967,7 +1094,7 @@ def create_app(settings: PoolSettings | None = None) -> FastAPI:
         media_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
         return FileResponse(path=target, media_type=media_type, filename=target.name)
 
-    @app.get("/api/v1/jobs/{job_id}/workspace", dependencies=[Depends(verify_api_key)])
+    @app.get("/api/v1/jobs/{job_id}/workspace", dependencies=[Depends(verify_owned_job)])
     async def inspect_job_workspace(
         job_id: str,
         file: str | None = Query(None),

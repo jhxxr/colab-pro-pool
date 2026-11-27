@@ -68,6 +68,26 @@ export interface ProxyConfig {
   updated_at: number
 }
 
+export interface McpKey {
+  key_id: string
+  name: string
+  token_prefix: string
+  enabled: boolean
+  cu_limit: number
+  cu_used: number
+  cu_remaining: number
+  allowed_models: string[]
+  created_at: number
+  updated_at: number
+  last_used_at: number | null
+}
+
+export interface McpKeyInput {
+  name: string
+  cu_limit: number
+  allowed_models: string[]
+}
+
 export interface DriveProfile {
   profile: string
   remote_name: string
@@ -81,6 +101,8 @@ export interface OutputFileDetail {
 
 export interface Job {
   job_id: string
+  mcp_key_id: string | null
+  cu_used: number
   name: string
   status: JobStatus | string
   gpu: string

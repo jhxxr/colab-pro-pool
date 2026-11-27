@@ -5,7 +5,7 @@ to your remote `colab-pro-pool` Linux server over HTTP/HTTPS.
 
 Environment variables:
   COLAB_POOL_SERVER_URL: e.g. http://your-server-ip:8080 (default: http://127.0.0.1:8080)
-  COLAB_POOL_API_KEY:    API key matching server's COLAB_POOL_API_KEY
+  COLAB_POOL_API_KEY:    Restricted MCP key issued by the pool administrator
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ from typing import Any
 
 import httpx
 
+from . import __version__
 from .utils import pack_local_dir_b64, safe_extract_tar
 
 MCP_PROTOCOL_VERSION = "2024-11-05"
@@ -42,8 +43,8 @@ TOOLS_SCHEMA: list[dict[str, Any]] = [
     {
         "name": "colab_pool_status",
         "description": (
-            "Query the remote Colab Pro account pool (idle/busy/cooldown counts, per-account "
-            "tier and errors) and list available pre-authorized Google Drive rclone profiles."
+            "Check this MCP key's remaining CU allowance and allowed GPU/TPU/CPU models, "
+            "plus pool availability. Always check before submitting a job."
         ),
         "inputSchema": {
             "type": "object",
@@ -54,8 +55,9 @@ TOOLS_SCHEMA: list[dict[str, Any]] = [
         "name": "submit_colab_job",
         "description": (
             "Submit a Python script (.py), notebook (.ipynb), or local project directory to run "
-            "on an idle Google Colab Pro GPU/TPU account. Supports non-interactive mounting of "
-            "your own Google Drive (`drive_profile`) to `/content/drive/MyDrive` and running "
+            "on an idle Google Colab Pro GPU/TPU account within this key's CU allowance and "
+            "allowed models. Administrator credentials additionally support Google Drive "
+            "mounting (`drive_profile`) to `/content/drive/MyDrive`. Supports running "
             "public dataset download commands inside Colab before training. Write outputs to "
             "`/content/outputs` (or `$COLAB_OUTPUT_DIR`) to retrieve them automatically."
         ),
@@ -109,7 +111,7 @@ TOOLS_SCHEMA: list[dict[str, Any]] = [
                 },
                 "drive_profile": {
                     "type": "string",
-                    "description": "Server rclone Google Drive profile name (mounts to /content/drive/MyDrive)",
+                    "description": "Administrator-only rclone Drive profile; leave empty for restricted MCP keys",
                     "default": "",
                 },
                 "drive_subpath": {
@@ -138,7 +140,7 @@ TOOLS_SCHEMA: list[dict[str, Any]] = [
     },
     {
         "name": "list_colab_jobs",
-        "description": "List recent Colab jobs on the pool server, optionally filtered by status.",
+        "description": "List this key's recent Colab jobs, optionally filtered by status.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -203,7 +205,7 @@ TOOLS_SCHEMA: list[dict[str, Any]] = [
 def _handle_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     with _client() as client:
         if name == "colab_pool_status":
-            resp = client.get("/api/v1/accounts")
+            resp = client.get("/api/v1/mcp/status")
             resp.raise_for_status()
             return resp.json()
 
@@ -302,7 +304,7 @@ def handle_jsonrpc_message(msg: dict[str, Any]) -> dict[str, Any] | None:
                 "result": {
                     "protocolVersion": MCP_PROTOCOL_VERSION,
                     "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "colab-pro-pool", "version": "0.2.1"},
+                    "serverInfo": {"name": "colab-pro-pool", "version": __version__},
                 },
             }
         if method == "ping":
@@ -326,11 +328,17 @@ def handle_jsonrpc_message(msg: dict[str, Any]) -> dict[str, Any] | None:
                     },
                 }
             except Exception as tool_exc:
+                error = str(tool_exc)
+                if isinstance(tool_exc, httpx.HTTPStatusError):
+                    try:
+                        error = str(tool_exc.response.json().get("detail", error))
+                    except (ValueError, AttributeError):
+                        pass
                 return {
                     "jsonrpc": "2.0",
                     "id": msg_id,
                     "result": {
-                        "content": [{"type": "text", "text": f"Error: {tool_exc}"}],
+                        "content": [{"type": "text", "text": f"Error: {error}"}],
                         "isError": True,
                     },
                 }
